@@ -164,7 +164,14 @@ impl<'a> JwtData<'a> {
     }
 
     /// Get an unverified payload claim value as a string.
+    /// If the verified cache is already populated (from a prior verified_payload access),
+    /// reuses it to avoid a redundant base64 decode.
     pub fn payload_claim(&self, claim: &str) -> Option<String> {
+        // Check verified cache first — avoids separate base64 decode when
+        // verified_payload was already accessed for this request.
+        if let Some(Some(payload)) = self.verified.borrow().as_ref() {
+            return payload.get(claim).map(json_value_to_string);
+        }
         self.ensure_unverified();
         let cache = self.unverified.borrow();
         cache
@@ -533,6 +540,55 @@ mod tests {
             json_value_to_string(&serde_json::Value::Bool(false)),
             "false"
         );
+    }
+
+    #[test]
+    fn test_verified_then_unverified_reuses_cache() {
+        let payload = serde_json::json!({"sub": "user_123", "exp": FUTURE_EXP});
+        let token = make_hs256_token(&payload);
+        let auth = format!("Bearer {}", token);
+        let config = hs256_config("test-secret");
+        let jwt_data = JwtData::new(Some(&auth), Some(&config));
+
+        // Access verified first
+        assert_eq!(
+            jwt_data.verified_payload_claim("sub"),
+            Some("user_123".to_string())
+        );
+        // Now access unverified — should reuse verified cache, unverified should stay None
+        assert_eq!(jwt_data.payload_claim("sub"), Some("user_123".to_string()));
+        assert!(jwt_data.unverified.borrow().is_none());
+    }
+
+    #[test]
+    fn test_unverified_then_verified_both_work() {
+        let payload = serde_json::json!({"sub": "user_123", "exp": FUTURE_EXP});
+        let token = make_hs256_token(&payload);
+        let auth = format!("Bearer {}", token);
+        let config = hs256_config("test-secret");
+        let jwt_data = JwtData::new(Some(&auth), Some(&config));
+
+        // Access unverified first
+        assert_eq!(jwt_data.payload_claim("sub"), Some("user_123".to_string()));
+        // Then verified
+        assert_eq!(
+            jwt_data.verified_payload_claim("sub"),
+            Some("user_123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_failed_verified_unverified_still_works() {
+        let payload = serde_json::json!({"sub": "user_99", "exp": FUTURE_EXP});
+        let token = make_hs256_token(&payload);
+        let auth = format!("Bearer {}", token);
+        let config = hs256_config("wrong-secret");
+        let jwt_data = JwtData::new(Some(&auth), Some(&config));
+
+        // Verified fails (wrong key)
+        assert_eq!(jwt_data.verified_payload_claim("sub"), None);
+        // Unverified still works via base64 decode (verified cache has None payload)
+        assert_eq!(jwt_data.payload_claim("sub"), Some("user_99".to_string()));
     }
 
     #[test]

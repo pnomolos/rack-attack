@@ -4,6 +4,7 @@ use crate::query::QueryData;
 use crate::request_data::RequestData;
 use percent_encoding::percent_decode_str;
 use std::borrow::Cow;
+use std::cell::OnceCell;
 
 /// Transform functions applied to field values before operator comparison.
 #[derive(Debug, Clone)]
@@ -75,6 +76,20 @@ pub struct RequestContext<'a> {
     pub jwt: Option<JwtData<'a>>,
     pub query: QueryData<'a>,
     pub body: BodyData<'a>,
+    pub uri_cache: OnceCell<String>,
+}
+
+impl<'a> RequestContext<'a> {
+    /// Get the full URI (path + "?" + query), cached after first call.
+    /// Returns a borrowed reference — zero-copy when query is empty.
+    pub fn uri<'b>(&'b self, data: &'a RequestData) -> &'b str {
+        if data.query_string.is_empty() {
+            &data.path
+        } else {
+            self.uri_cache
+                .get_or_init(|| format!("{}?{}", data.path, data.query_string))
+        }
+    }
 }
 
 impl Field {
@@ -149,7 +164,7 @@ impl Field {
     pub fn extract<'a>(
         &self,
         data: &'a RequestData,
-        ctx: &RequestContext<'a>,
+        ctx: &'a RequestContext<'a>,
     ) -> FieldValue<'a> {
         match self {
             // Non-JWT fields — all zero-copy borrows from RequestData
@@ -169,17 +184,8 @@ impl Field {
                 FieldValue::OptStr(data.cookies.get(name).map(|s| Cow::Borrowed(s.as_str())))
             }
 
-            // URI = path + "?" + query (or just path if query is empty)
-            Field::Uri => {
-                if data.query_string.is_empty() {
-                    FieldValue::Str(Cow::Borrowed(&data.path))
-                } else {
-                    FieldValue::Str(Cow::Owned(format!(
-                        "{}?{}",
-                        data.path, data.query_string
-                    )))
-                }
-            }
+            // URI = path + "?" + query (cached after first access)
+            Field::Uri => FieldValue::Str(Cow::Borrowed(ctx.uri(data))),
 
             // PathExtension: extension after last '.' in filename portion (as-is, no lowercasing)
             // Users can apply `lower` transform explicitly if needed.
@@ -201,7 +207,7 @@ impl Field {
 
             // Query parameter from parsed query string
             Field::QueryParam(name) => {
-                FieldValue::OptStr(ctx.query.get(name).map(Cow::Owned))
+                FieldValue::OptStr(ctx.query.get(name).map(Cow::Borrowed))
             }
 
             // Raw request body
@@ -209,9 +215,13 @@ impl Field {
                 FieldValue::OptStr(ctx.body.raw().map(Cow::Borrowed))
             }
 
-            // JSON body field
+            // JSON body field — try zero-copy borrow for string values first
             Field::BodyJsonField(key) => {
-                FieldValue::OptStr(ctx.body.json_field(key).map(Cow::Owned))
+                if let Some(s) = ctx.body.json_field_str(key) {
+                    FieldValue::OptStr(Some(Cow::Borrowed(s)))
+                } else {
+                    FieldValue::OptStr(ctx.body.json_field_string(key).map(Cow::Owned))
+                }
             }
 
             // JWT fields — return owned strings from JWT decode
@@ -504,6 +514,71 @@ mod tests {
         assert_eq!(FieldValue::OptStr(Some(Cow::Borrowed("y"))).as_str(), Some("y"));
         assert_eq!(FieldValue::OptStr(None).as_str(), None);
         assert_eq!(FieldValue::Number(42).as_str(), None);
+    }
+
+    // --- URI cache tests ---
+
+    #[test]
+    fn test_uri_cache_no_query() {
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData {
+            path: "/api/users".to_string(),
+            query_string: String::new(),
+            ..Default::default()
+        };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        // Empty query → borrows path directly, no allocation
+        assert_eq!(ctx.uri(&data), "/api/users");
+        assert!(ctx.uri_cache.get().is_none()); // OnceCell not used
+    }
+
+    #[test]
+    fn test_uri_cache_with_query() {
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData {
+            path: "/api/users".to_string(),
+            query_string: "page=1".to_string(),
+            ..Default::default()
+        };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        assert_eq!(ctx.uri(&data), "/api/users?page=1");
+        assert!(ctx.uri_cache.get().is_some()); // cached
+    }
+
+    #[test]
+    fn test_uri_cache_multiple_access() {
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData {
+            path: "/api/users".to_string(),
+            query_string: "page=1".to_string(),
+            ..Default::default()
+        };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        let ptr1 = ctx.uri(&data) as *const str;
+        let ptr2 = ctx.uri(&data) as *const str;
+        // Second access returns the same pointer (cached)
+        assert_eq!(ptr1, ptr2);
     }
 
     // --- PathExtension dotfile ---

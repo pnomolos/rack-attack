@@ -1,10 +1,126 @@
 use crate::body::BodyData;
-use crate::field::RequestContext;
+use crate::field::{Field, RequestContext, Transform};
 use crate::jwt::{JwtConfig, JwtData};
 use crate::query::QueryData;
 use crate::request_data::RequestData;
 use crate::result::{EvaluationResult, ThrottleMatch};
-use crate::rule::{compile_rule, extract_throttle_key, RawRuleSet, Rule, RuleType};
+use crate::rule::{compile_rule, extract_throttle_key, Condition, Operator, RawRuleSet, Rule, RuleType};
+use std::collections::HashSet;
+
+/// Categories of request fields that may need to be marshalled from Ruby.
+/// Path, Method, and IP are always sent (near-zero cost).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FieldCategory {
+    Body,
+    Headers,
+    Cookies,
+    Authorization,
+    UserAgent,
+    Host,
+    ContentLength,
+    QueryString,
+}
+
+impl FieldCategory {
+    pub fn name(&self) -> &'static str {
+        match self {
+            FieldCategory::Body => "body",
+            FieldCategory::Headers => "headers",
+            FieldCategory::Cookies => "cookies",
+            FieldCategory::Authorization => "authorization",
+            FieldCategory::UserAgent => "user_agent",
+            FieldCategory::Host => "host",
+            FieldCategory::ContentLength => "content_length",
+            FieldCategory::QueryString => "query_string",
+        }
+    }
+}
+
+/// Collect which field categories a condition tree references.
+fn collect_field_categories(condition: &Condition, categories: &mut HashSet<FieldCategory>) {
+    match condition {
+        Condition::Always => {}
+        Condition::Leaf { field, .. } => {
+            collect_field_category(field, categories);
+        }
+        Condition::And(children) | Condition::Or(children) => {
+            for child in children {
+                collect_field_categories(child, categories);
+            }
+        }
+        Condition::Not(child) => collect_field_categories(child, categories),
+    }
+}
+
+fn collect_field_category(field: &Field, categories: &mut HashSet<FieldCategory>) {
+    match field {
+        // Path, Method, IpSrc are always sent — no category needed
+        Field::Path | Field::Method | Field::IpSrc | Field::PathExtension => {}
+        Field::UserAgent => { categories.insert(FieldCategory::UserAgent); }
+        Field::Host => { categories.insert(FieldCategory::Host); }
+        Field::QueryString => { categories.insert(FieldCategory::QueryString); }
+        Field::ContentLength => { categories.insert(FieldCategory::ContentLength); }
+        Field::Header(_) => { categories.insert(FieldCategory::Headers); }
+        Field::Cookie(_) => { categories.insert(FieldCategory::Cookies); }
+        Field::Uri | Field::QueryParam(_) => { categories.insert(FieldCategory::QueryString); }
+        Field::BodyRaw | Field::BodyJsonField(_) => { categories.insert(FieldCategory::Body); }
+        Field::JwtPayload(_) | Field::JwtHeader(_) | Field::JwtVerifiedPayload(_) | Field::JwtValid => {
+            categories.insert(FieldCategory::Authorization);
+        }
+    }
+}
+
+/// Estimate the evaluation cost of a condition for rule ordering.
+/// Lower cost = cheaper to evaluate = should be checked first.
+fn estimate_rule_cost(condition: &Condition) -> u32 {
+    match condition {
+        Condition::Always => 0,
+        Condition::Leaf { field, operator, transforms, .. } => {
+            let field_cost = estimate_field_cost(field);
+            let op_cost = estimate_operator_cost(operator);
+            let transform_cost: u32 = transforms.iter().map(estimate_transform_cost).sum();
+            field_cost + op_cost + transform_cost
+        }
+        Condition::And(children) => children.iter().map(estimate_rule_cost).sum(),
+        Condition::Or(children) => children.iter().map(estimate_rule_cost).min().unwrap_or(0),
+        Condition::Not(child) => estimate_rule_cost(child),
+    }
+}
+
+fn estimate_field_cost(field: &Field) -> u32 {
+    match field {
+        Field::Path | Field::Method | Field::IpSrc => 1,
+        Field::UserAgent | Field::Host | Field::PathExtension => 2,
+        Field::QueryString | Field::ContentLength | Field::Uri => 2,
+        Field::Header(_) | Field::Cookie(_) => 4,
+        Field::QueryParam(_) => 5,
+        Field::BodyRaw => 8,
+        Field::BodyJsonField(_) => 10,
+        Field::JwtPayload(_) | Field::JwtHeader(_) => 15,
+        Field::JwtValid => 20,
+        Field::JwtVerifiedPayload(_) => 50,
+    }
+}
+
+fn estimate_operator_cost(op: &Operator) -> u32 {
+    match op {
+        Operator::Exists | Operator::NotExists | Operator::Eq | Operator::Ne => 1,
+        Operator::In | Operator::NotIn | Operator::StartsWith | Operator::EndsWith => 2,
+        Operator::Contains => 3,
+        Operator::InIpRange | Operator::NotInIpRange => 5,
+        Operator::Wildcard => 6,
+        Operator::Gt | Operator::Lt | Operator::Gte | Operator::Lte => 1,
+        Operator::Matches => 8,
+    }
+}
+
+fn estimate_transform_cost(transform: &Transform) -> u32 {
+    match transform {
+        Transform::Length => 1,
+        Transform::Lower | Transform::Upper => 3,
+        Transform::UrlDecode => 5,
+    }
+}
 
 /// A compiled rule set, partitioned by type for efficient evaluation.
 pub struct RuleSet {
@@ -13,6 +129,8 @@ pub struct RuleSet {
     pub throttles: Vec<Rule>,
     pub tracks: Vec<Rule>,
     pub jwt_config: Option<JwtConfig>,
+    /// Which field categories are actually referenced by rules in this set.
+    pub required_categories: HashSet<FieldCategory>,
 }
 
 impl RuleSet {
@@ -41,13 +159,39 @@ impl RuleSet {
             }
         }
 
+        // Sort rules by estimated evaluation cost (cheapest first) for faster short-circuiting
+        safelists.sort_by_key(|r| estimate_rule_cost(&r.condition));
+        blocklists.sort_by_key(|r| estimate_rule_cost(&r.condition));
+        throttles.sort_by_key(|r| estimate_rule_cost(&r.condition));
+        tracks.sort_by_key(|r| estimate_rule_cost(&r.condition));
+
+        // Collect which field categories are actually needed by all rules
+        let mut required_categories = HashSet::new();
+        let all_rules = safelists.iter()
+            .chain(blocklists.iter())
+            .chain(throttles.iter())
+            .chain(tracks.iter());
+        for rule in all_rules {
+            collect_field_categories(&rule.condition, &mut required_categories);
+            // Also check throttle key fields
+            for key_field in &rule.key_fields {
+                collect_field_category(key_field, &mut required_categories);
+            }
+        }
+
         Ok(RuleSet {
             safelists,
             blocklists,
             throttles,
             tracks,
             jwt_config,
+            required_categories,
         })
+    }
+
+    /// Return the list of required field category names for Ruby-side marshalling.
+    pub fn required_fields(&self) -> Vec<String> {
+        self.required_categories.iter().map(|c| c.name().to_string()).collect()
     }
 
     /// Evaluate all rules against a request.
@@ -69,6 +213,7 @@ impl RuleSet {
             jwt: Some(jwt_data),
             query: query_data,
             body: body_data,
+            uri_cache: std::cell::OnceCell::new(),
         };
 
         // 1. Safelists — first match wins
@@ -338,5 +483,187 @@ mod tests {
         let data2 = make_request("1.2.3.4", "/search", None);
         let result2 = rs.evaluate(&data2);
         assert!(result2.tracked.is_empty());
+    }
+
+    // --- Cost-based ordering tests ---
+
+    // --- Required fields tests ---
+
+    #[test]
+    fn test_required_fields_path_only() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "health",
+                    "type": "safelist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/health"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        // Path-only rule needs no extra categories
+        assert!(rs.required_categories.is_empty());
+        assert!(rs.required_fields().is_empty());
+    }
+
+    #[test]
+    fn test_required_fields_jwt() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "jwt-check",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "jwt.verified_payload[\"role\"]",
+                        "operator": "ne",
+                        "value": "admin"
+                    }
+                }
+            ],
+            "jwt_keys": [{"algorithm": "HS256", "key": "test-secret"}]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert!(rs.required_categories.contains(&FieldCategory::Authorization));
+        assert_eq!(rs.required_categories.len(), 1);
+    }
+
+    #[test]
+    fn test_required_fields_body() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "body-check",
+                    "type": "track",
+                    "condition": {
+                        "field": "http.request.body.json[\"action\"]",
+                        "operator": "eq",
+                        "value": "delete"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert!(rs.required_categories.contains(&FieldCategory::Body));
+        assert_eq!(rs.required_categories.len(), 1);
+    }
+
+    #[test]
+    fn test_required_fields_headers_cookies() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "header-check",
+                    "type": "blocklist",
+                    "condition": {
+                        "and": [
+                            { "field": "http.request.headers[\"x-api-key\"]", "operator": "exists" },
+                            { "field": "http.request.cookies[\"session\"]", "operator": "exists" }
+                        ]
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert!(rs.required_categories.contains(&FieldCategory::Headers));
+        assert!(rs.required_categories.contains(&FieldCategory::Cookies));
+        assert_eq!(rs.required_categories.len(), 2);
+    }
+
+    #[test]
+    fn test_cost_ordering_safelists() {
+        // JWT safelist has higher cost than path eq safelist
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "jwt-safelist",
+                    "type": "safelist",
+                    "condition": {
+                        "field": "jwt.verified_payload[\"role\"]",
+                        "operator": "eq",
+                        "value": "admin"
+                    }
+                },
+                {
+                    "name": "path-safelist",
+                    "type": "safelist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/health"
+                    }
+                }
+            ],
+            "jwt_keys": [{"algorithm": "HS256", "key": "test-secret"}]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        // Path eq (cost=2) should come before JWT verified (cost=51)
+        assert_eq!(rs.safelists[0].name, "path-safelist");
+        assert_eq!(rs.safelists[1].name, "jwt-safelist");
+    }
+
+    #[test]
+    fn test_cost_ordering_blocklists() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "regex-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.user_agent",
+                        "operator": "matches",
+                        "value": "\\b(AhrefsBot|SemrushBot)\\b"
+                    }
+                },
+                {
+                    "name": "ip-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "ip.src",
+                        "operator": "in_ip_range",
+                        "value": ["10.0.0.0/8"]
+                    }
+                },
+                {
+                    "name": "simple-eq-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        // simple eq (1+1=2) < ip range (1+5=6) < regex ua (2+8=10)
+        assert_eq!(rs.blocklists[0].name, "simple-eq-blocklist");
+        assert_eq!(rs.blocklists[1].name, "ip-blocklist");
+        assert_eq!(rs.blocklists[2].name, "regex-blocklist");
+    }
+
+    #[test]
+    fn test_cost_ordering_preserves_correctness() {
+        // Same as simple_rules_json but verify results are identical
+        let rs = RuleSet::from_json(simple_rules_json()).unwrap();
+
+        // Safelist still works
+        let data = make_request("10.0.1.50", "/api/v2/users", Some("Mozilla/5.0"));
+        let result = rs.evaluate(&data);
+        assert_eq!(result.safelisted.as_deref(), Some("internal-net"));
+
+        // Blocklist still works
+        let data2 = make_request("203.0.113.1", "/", Some("AhrefsBot/7.0"));
+        let result2 = rs.evaluate(&data2);
+        assert_eq!(result2.blocklisted.as_deref(), Some("bad-bot"));
+
+        // Throttle + track still work
+        let data3 = make_request("203.0.113.1", "/api/v2/users", Some("Mozilla/5.0"));
+        let result3 = rs.evaluate(&data3);
+        assert_eq!(result3.throttle_matches[0].name, "api-rate");
+        assert_eq!(result3.tracked, vec!["api-version"]);
     }
 }

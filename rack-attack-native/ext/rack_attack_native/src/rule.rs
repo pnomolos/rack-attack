@@ -357,6 +357,24 @@ impl Condition {
     }
 }
 
+/// Compare a numeric value against a compiled numeric threshold.
+fn eval_numeric(value: u64, operator: &Operator, compiled: &CompiledValue) -> bool {
+    if let CompiledValue::Number(threshold) = compiled {
+        let nf = value as f64;
+        match operator {
+            Operator::Gt => nf > *threshold,
+            Operator::Lt => nf < *threshold,
+            Operator::Gte => nf >= *threshold,
+            Operator::Lte => nf <= *threshold,
+            Operator::Eq => (nf - *threshold).abs() < f64::EPSILON,
+            Operator::Ne => (nf - *threshold).abs() >= f64::EPSILON,
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
 fn eval_leaf(
     field: &Field,
     operator: &Operator,
@@ -374,6 +392,31 @@ fn eval_leaf(
         _ => {}
     }
 
+    // Fast path: [lower/upper..., length] on ASCII → skip string transforms
+    if let Some(Transform::Length) = transforms.last() {
+        if matches!(compiled, CompiledValue::Number(_)) {
+            let all_preserve = transforms[..transforms.len() - 1]
+                .iter()
+                .all(|t| matches!(t, Transform::Lower | Transform::Upper));
+            if all_preserve {
+                let is_ascii = match &raw_val {
+                    FieldValue::Str(cow) => cow.is_ascii(),
+                    FieldValue::OptStr(Some(cow)) => cow.is_ascii(),
+                    _ => true,
+                };
+                if is_ascii {
+                    let len = match &raw_val {
+                        FieldValue::Str(cow) => cow.len() as u64,
+                        FieldValue::OptStr(Some(cow)) => cow.len() as u64,
+                        FieldValue::OptStr(None) => 0,
+                        FieldValue::Number(n) => *n,
+                    };
+                    return eval_numeric(len, operator, compiled);
+                }
+            }
+        }
+    }
+
     let field_val = if transforms.is_empty() {
         raw_val
     } else {
@@ -382,19 +425,7 @@ fn eval_leaf(
 
     // For numeric fields with numeric operators
     if let FieldValue::Number(n) = &field_val {
-        if let CompiledValue::Number(threshold) = compiled {
-            let nf = *n as f64;
-            return match operator {
-                Operator::Gt => nf > *threshold,
-                Operator::Lt => nf < *threshold,
-                Operator::Gte => nf >= *threshold,
-                Operator::Lte => nf <= *threshold,
-                Operator::Eq => (nf - *threshold).abs() < f64::EPSILON,
-                Operator::Ne => (nf - *threshold).abs() >= f64::EPSILON,
-                _ => false,
-            };
-        }
-        return false;
+        return eval_numeric(*n, operator, compiled);
     }
 
     let s = match field_val.as_str() {
@@ -489,6 +520,7 @@ mod tests {
             jwt: None,
             query: QueryData::new(&data.query_string),
             body: BodyData::new(data.body.as_deref()),
+            uri_cache: std::cell::OnceCell::new(),
         }
     }
 
@@ -1155,5 +1187,66 @@ mod tests {
             &ctx,
         );
         assert_eq!(key, None);
+    }
+
+    // --- Length transform fast-path tests ---
+
+    #[test]
+    fn test_length_fast_path_ascii() {
+        // [lower, length] on ASCII path should use fast path
+        let data = test_request(); // path = "/api/v2/users" (13 chars)
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Gt,
+            compiled: CompiledValue::Number(10.0),
+            transforms: vec![Transform::Lower, Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_length_only_fast_path() {
+        // [length] alone uses fast path (no preceding transforms)
+        let data = test_request(); // path = "/api/v2/users" (13 chars)
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Eq,
+            compiled: CompiledValue::Number(13.0),
+            transforms: vec![Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_length_no_fast_path_url_decode() {
+        // [url_decode, length] should NOT use fast path (url_decode changes length)
+        let mut data = test_request();
+        data.path = "/foo%20bar".to_string(); // url_decode → "/foo bar" (8 chars)
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Eq,
+            compiled: CompiledValue::Number(8.0),
+            transforms: vec![Transform::UrlDecode, Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_length_no_fast_path_non_ascii() {
+        // Non-ASCII: lower/upper may change byte length, so fast path is skipped
+        let mut data = test_request();
+        data.path = "/café".to_string(); // non-ASCII
+        let ctx = test_ctx(&data);
+        // [lower, length] on non-ASCII falls back to full pipeline
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Gt,
+            compiled: CompiledValue::Number(3.0),
+            transforms: vec![Transform::Lower, Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
     }
 }

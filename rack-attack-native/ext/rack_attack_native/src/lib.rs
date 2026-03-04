@@ -102,6 +102,10 @@ impl RubyRuleSet {
         let rs = &self.inner;
         rs.safelists.len() + rs.blocklists.len() + rs.throttles.len() + rs.tracks.len()
     }
+
+    fn required_fields(&self) -> Vec<String> {
+        self.inner.required_fields()
+    }
 }
 
 #[magnus::init]
@@ -112,6 +116,7 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_singleton_method("from_json", function!(RubyRuleSet::from_json, 1))?;
     class.define_method("evaluate", method!(RubyRuleSet::evaluate, 1))?;
     class.define_method("rule_count", method!(RubyRuleSet::rule_count, 0))?;
+    class.define_method("required_fields", method!(RubyRuleSet::required_fields, 0))?;
 
     Ok(())
 }

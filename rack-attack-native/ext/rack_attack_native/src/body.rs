@@ -1,17 +1,17 @@
 use serde_json::Value;
-use std::cell::RefCell;
+use std::cell::OnceCell;
 
 /// Lazy JSON body parser. Parses on first access and caches the result.
 pub struct BodyData<'a> {
     raw: Option<&'a str>,
-    parsed: RefCell<Option<Option<Value>>>, // outer Option = cached?, inner = parse result
+    parsed: OnceCell<Option<Value>>,
 }
 
 impl<'a> BodyData<'a> {
     pub fn new(raw: Option<&'a str>) -> Self {
         BodyData {
             raw,
-            parsed: RefCell::new(None),
+            parsed: OnceCell::new(),
         }
     }
 
@@ -19,12 +19,18 @@ impl<'a> BodyData<'a> {
         self.raw
     }
 
-    pub fn json_field(&self, key: &str) -> Option<String> {
-        self.ensure_parsed();
-        let cache = self.parsed.borrow();
-        cache
+    /// Get a JSON field value as a borrowed &str (zero-copy for string values).
+    /// Returns None for non-string values; use json_field_string() for those.
+    pub fn json_field_str(&self, key: &str) -> Option<&str> {
+        self.parsed()
             .as_ref()
-            .unwrap()
+            .and_then(|val| val.get(key))
+            .and_then(|v| v.as_str())
+    }
+
+    /// Get a JSON field value as an owned String (for non-string JSON values like numbers, bools).
+    pub fn json_field_string(&self, key: &str) -> Option<String> {
+        self.parsed()
             .as_ref()
             .and_then(|val| val.get(key))
             .map(|v| match v {
@@ -33,12 +39,14 @@ impl<'a> BodyData<'a> {
             })
     }
 
-    fn ensure_parsed(&self) {
-        if self.parsed.borrow().is_some() {
-            return;
-        }
-        let result = self.raw.and_then(|s| serde_json::from_str(s).ok());
-        *self.parsed.borrow_mut() = Some(result);
+    /// Get a JSON field as an owned String (convenience method, tries borrowed first).
+    pub fn json_field(&self, key: &str) -> Option<String> {
+        self.json_field_string(key)
+    }
+
+    fn parsed(&self) -> &Option<Value> {
+        self.parsed
+            .get_or_init(|| self.raw.and_then(|s| serde_json::from_str(s).ok()))
     }
 }
 
@@ -87,5 +95,26 @@ mod tests {
     fn test_raw_body_none() {
         let bd = BodyData::new(None);
         assert_eq!(bd.raw(), None);
+    }
+
+    #[test]
+    fn test_json_field_str_borrows() {
+        let bd = BodyData::new(Some(r#"{"name": "Alice"}"#));
+        // String values should be borrowable
+        assert_eq!(bd.json_field_str("name"), Some("Alice"));
+    }
+
+    #[test]
+    fn test_json_field_str_returns_none_for_number() {
+        let bd = BodyData::new(Some(r#"{"count": 42}"#));
+        // Non-string values return None from json_field_str
+        assert_eq!(bd.json_field_str("count"), None);
+    }
+
+    #[test]
+    fn test_json_field_string_number() {
+        let bd = BodyData::new(Some(r#"{"count": 42}"#));
+        // Non-string values return owned string via json_field_string
+        assert_eq!(bd.json_field_string("count"), Some("42".to_string()));
     }
 }
