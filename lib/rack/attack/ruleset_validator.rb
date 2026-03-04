@@ -12,6 +12,7 @@ module Rack
       ].freeze
 
       VALID_TRANSFORMS = %w[lower upper url_decode length].freeze
+      VALID_RULE_ORDERS = %w[cost insertion].freeze
 
       STATIC_FIELDS = %w[
         ip.src
@@ -54,6 +55,12 @@ module Rack
         rules = data["rules"]
         unless rules.is_a?(Array)
           return Result.new(valid?: false, errors: ["Ruleset must contain a \"rules\" array"])
+        end
+
+        if data.key?("rule_order")
+          unless VALID_RULE_ORDERS.include?(data["rule_order"])
+            @errors << "\"rule_order\" must be one of: #{VALID_RULE_ORDERS.join(", ")}"
+          end
         end
 
         seen_names = {}
@@ -119,6 +126,18 @@ module Rack
         if rule["type"] && !VALID_TYPES.include?(rule["type"])
           @errors << "#{prefix}: invalid type \"#{rule["type"]}\", must be one of: #{VALID_TYPES.join(", ")}"
         end
+
+        if rule.key?("enabled") && ![true, false].include?(rule["enabled"])
+          @errors << "#{prefix}: \"enabled\" must be a boolean"
+        end
+
+        if rule.key?("description") && !rule["description"].is_a?(String)
+          @errors << "#{prefix}: \"description\" must be a string"
+        end
+
+        # Disabled rules only need name, type, enabled, and description validated.
+        # Skip condition/throttle/key checks since the rule will never be evaluated.
+        return if rule["enabled"] == false
 
         unless rule.key?("condition")
           @errors << "#{prefix}: missing \"condition\""

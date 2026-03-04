@@ -150,6 +150,10 @@ impl RuleSet {
         let mut tracks = Vec::new();
 
         for raw_rule in &raw.rules {
+            // Skip disabled rules entirely
+            if !raw_rule.enabled {
+                continue;
+            }
             let rule = compile_rule(raw_rule)?;
             match rule.rule_type {
                 RuleType::Safelist => safelists.push(rule),
@@ -159,11 +163,23 @@ impl RuleSet {
             }
         }
 
-        // Sort rules by estimated evaluation cost (cheapest first) for faster short-circuiting
-        safelists.sort_by_key(|r| estimate_rule_cost(&r.condition));
-        blocklists.sort_by_key(|r| estimate_rule_cost(&r.condition));
-        throttles.sort_by_key(|r| estimate_rule_cost(&r.condition));
-        tracks.sort_by_key(|r| estimate_rule_cost(&r.condition));
+        // Validate and apply rule ordering
+        let use_cost_order = match raw.rule_order.as_deref() {
+            None | Some("cost") => true,
+            Some("insertion") => false,
+            Some(other) => {
+                return Err(format!(
+                    "Invalid rule_order \"{}\", must be \"cost\" or \"insertion\"",
+                    other
+                ));
+            }
+        };
+        if use_cost_order {
+            safelists.sort_by_key(|r| estimate_rule_cost(&r.condition));
+            blocklists.sort_by_key(|r| estimate_rule_cost(&r.condition));
+            throttles.sort_by_key(|r| estimate_rule_cost(&r.condition));
+            tracks.sort_by_key(|r| estimate_rule_cost(&r.condition));
+        }
 
         // Collect which field categories are actually needed by all rules
         let mut required_categories = HashSet::new();
@@ -665,5 +681,193 @@ mod tests {
         let result3 = rs.evaluate(&data3);
         assert_eq!(result3.throttle_matches[0].name, "api-rate");
         assert_eq!(result3.tracked, vec!["api-version"]);
+    }
+
+    // --- Disabled rules tests ---
+
+    #[test]
+    fn test_disabled_rules_skipped() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "disabled-block",
+                    "type": "blocklist",
+                    "enabled": false,
+                    "description": "This rule is disabled for testing",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                },
+                {
+                    "name": "enabled-track",
+                    "type": "track",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert!(rs.blocklists.is_empty(), "disabled blocklist should be skipped");
+        assert_eq!(rs.tracks.len(), 1);
+
+        let data = make_request("1.2.3.4", "/blocked", None);
+        let result = rs.evaluate(&data);
+        assert!(result.blocklisted.is_none());
+        assert_eq!(result.tracked, vec!["enabled-track"]);
+    }
+
+    #[test]
+    fn test_enabled_default_true() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "no-enabled-field",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert_eq!(rs.blocklists.len(), 1);
+    }
+
+    #[test]
+    fn test_description_field_accepted() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "with-desc",
+                    "type": "track",
+                    "description": "A helpful description",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        assert_eq!(rs.tracks.len(), 1);
+    }
+
+    // --- Insertion order tests ---
+
+    #[test]
+    fn test_insertion_order() {
+        let json = r#"{
+            "rule_order": "insertion",
+            "rules": [
+                {
+                    "name": "regex-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.user_agent",
+                        "operator": "matches",
+                        "value": "\\b(AhrefsBot|SemrushBot)\\b"
+                    }
+                },
+                {
+                    "name": "simple-eq-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        // With insertion order, regex-blocklist should come first (not re-sorted by cost)
+        assert_eq!(rs.blocklists[0].name, "regex-blocklist");
+        assert_eq!(rs.blocklists[1].name, "simple-eq-blocklist");
+    }
+
+    #[test]
+    fn test_cost_order_explicit() {
+        let json = r#"{
+            "rule_order": "cost",
+            "rules": [
+                {
+                    "name": "regex-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.user_agent",
+                        "operator": "matches",
+                        "value": "\\b(AhrefsBot|SemrushBot)\\b"
+                    }
+                },
+                {
+                    "name": "simple-eq-blocklist",
+                    "type": "blocklist",
+                    "condition": {
+                        "field": "http.request.uri.path",
+                        "operator": "eq",
+                        "value": "/blocked"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+        // With cost order, simple-eq (cost 2) should come before regex (cost 10)
+        assert_eq!(rs.blocklists[0].name, "simple-eq-blocklist");
+        assert_eq!(rs.blocklists[1].name, "regex-blocklist");
+    }
+
+    // --- Nested body JSON tests ---
+
+    #[test]
+    fn test_nested_body_json() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "nested-check",
+                    "type": "track",
+                    "condition": {
+                        "field": "http.request.body.json[\"user.profile.name\"]",
+                        "operator": "eq",
+                        "value": "Alice"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+
+        let mut data = make_request("1.2.3.4", "/api", None);
+        data.body = Some(r#"{"user": {"profile": {"name": "Alice"}}}"#.to_string());
+        let result = rs.evaluate(&data);
+        assert_eq!(result.tracked, vec!["nested-check"]);
+    }
+
+    #[test]
+    fn test_nested_body_json_missing_key() {
+        let json = r#"{
+            "rules": [
+                {
+                    "name": "nested-missing",
+                    "type": "track",
+                    "condition": {
+                        "field": "http.request.body.json[\"user.profile.email\"]",
+                        "operator": "exists"
+                    }
+                }
+            ]
+        }"#;
+        let rs = RuleSet::from_json(json).unwrap();
+
+        let mut data = make_request("1.2.3.4", "/api", None);
+        data.body = Some(r#"{"user": {"profile": {"name": "Alice"}}}"#.to_string());
+        let result = rs.evaluate(&data);
+        assert!(result.tracked.is_empty());
     }
 }

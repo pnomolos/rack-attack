@@ -128,7 +128,8 @@ module Rack
             parse_query_params[param_name]
           when /\Ahttp\.request\.body\.json\["([^"]+)"\]\z/
             json_key = Regexp.last_match(1)
-            parse_body_json&.dig(json_key)&.to_s
+            keys = json_key.split(".")
+            parse_body_json&.dig(*keys)&.to_s
           when /\Ajwt\.payload\["([^"]+)"\]\z/
             claim = Regexp.last_match(1)
             decode_jwt_payload&.dig(claim)&.to_s

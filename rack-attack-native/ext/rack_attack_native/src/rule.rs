@@ -14,6 +14,9 @@ pub struct RawRuleSet {
     pub rules: Vec<RawRule>,
     #[serde(default)]
     pub jwt_keys: Option<Vec<RawJwtKey>>,
+    /// Rule evaluation order: "cost" (default) sorts cheapest first, "insertion" preserves JSON order.
+    #[serde(default)]
+    pub rule_order: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +28,18 @@ pub struct RawRule {
     pub limit: Option<u64>,
     pub period: Option<u64>,
     pub key: Option<Vec<String>>,
+    /// Optional enable/disable toggle. Defaults to true.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    /// Optional human-readable description (informational only).
+    /// Present in the struct for serde compatibility (so JSON with "description" doesn't fail).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub description: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -835,7 +850,7 @@ mod tests {
         let mut data = test_request();
         data.body = Some(r#"{"user_id": "123", "name": "Alice"}"#.to_string());
         let ctx = test_ctx(&data);
-        let val = Field::BodyJsonField("user_id".to_string()).extract(&data, &ctx);
+        let val = Field::BodyJsonField(vec!["user_id".to_string()]).extract(&data, &ctx);
         assert_eq!(val.as_str(), Some("123"));
     }
 
@@ -844,7 +859,7 @@ mod tests {
         let mut data = test_request();
         data.body = Some(r#"{"a": "b"}"#.to_string());
         let ctx = test_ctx(&data);
-        let val = Field::BodyJsonField("missing".to_string()).extract(&data, &ctx);
+        let val = Field::BodyJsonField(vec!["missing".to_string()]).extract(&data, &ctx);
         assert!(!val.exists());
     }
 
@@ -908,6 +923,8 @@ mod tests {
             limit: None,
             period: Some(60),
             key: Some(vec!["ip.src".into()]),
+            enabled: true,
+            description: None,
         };
         assert!(compile_rule(&raw).is_err());
     }
@@ -921,6 +938,8 @@ mod tests {
             limit: Some(100),
             period: None,
             key: Some(vec!["ip.src".into()]),
+            enabled: true,
+            description: None,
         };
         assert!(compile_rule(&raw).is_err());
     }
@@ -934,6 +953,8 @@ mod tests {
             limit: Some(100),
             period: Some(60),
             key: None,
+            enabled: true,
+            description: None,
         };
         let rule = compile_rule(&raw).unwrap();
         assert_eq!(rule.key_fields.len(), 1);

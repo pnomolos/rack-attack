@@ -19,29 +19,29 @@ impl<'a> BodyData<'a> {
         self.raw
     }
 
-    /// Get a JSON field value as a borrowed &str (zero-copy for string values).
-    /// Returns None for non-string values; use json_field_string() for those.
-    pub fn json_field_str(&self, key: &str) -> Option<&str> {
-        self.parsed()
-            .as_ref()
-            .and_then(|val| val.get(key))
-            .and_then(|v| v.as_str())
+    /// Navigate a JSON path (one or more keys) and return borrowed &str for string leaf values.
+    /// Returns None for non-string values; use json_nested_field_string() for those.
+    pub fn json_nested_field_str(&self, keys: &[String]) -> Option<&str> {
+        let parsed = self.parsed().as_ref()?;
+        let mut current = parsed;
+        for key in keys {
+            current = current.get(key.as_str())?;
+        }
+        current.as_str()
     }
 
-    /// Get a JSON field value as an owned String (for non-string JSON values like numbers, bools).
-    pub fn json_field_string(&self, key: &str) -> Option<String> {
-        self.parsed()
-            .as_ref()
-            .and_then(|val| val.get(key))
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            })
-    }
-
-    /// Get a JSON field as an owned String (convenience method, tries borrowed first).
-    pub fn json_field(&self, key: &str) -> Option<String> {
-        self.json_field_string(key)
+    /// Navigate a JSON path (one or more keys) and return owned String for any leaf value.
+    /// Non-string JSON values (numbers, bools) are stringified.
+    pub fn json_nested_field_string(&self, keys: &[String]) -> Option<String> {
+        let parsed = self.parsed().as_ref()?;
+        let mut current = parsed;
+        for key in keys {
+            current = current.get(key.as_str())?;
+        }
+        Some(match current {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        })
     }
 
     fn parsed(&self) -> &Option<Value> {
@@ -55,34 +55,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_json_field_string() {
+    fn test_json_nested_single_key_string() {
         let bd = BodyData::new(Some(r#"{"user_id": "123", "name": "Alice"}"#));
-        assert_eq!(bd.json_field("user_id"), Some("123".to_string()));
-        assert_eq!(bd.json_field("name"), Some("Alice".to_string()));
+        let keys = vec!["user_id".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), Some("123"));
+        let keys2 = vec!["name".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys2), Some("Alice"));
     }
 
     #[test]
-    fn test_json_field_number() {
+    fn test_json_nested_single_key_number() {
         let bd = BodyData::new(Some(r#"{"count": 42}"#));
-        assert_eq!(bd.json_field("count"), Some("42".to_string()));
+        let keys = vec!["count".to_string()];
+        // Non-string values return None from json_nested_field_str
+        assert_eq!(bd.json_nested_field_str(&keys), None);
+        // But return stringified from json_nested_field_string
+        assert_eq!(bd.json_nested_field_string(&keys), Some("42".to_string()));
     }
 
     #[test]
-    fn test_json_field_missing() {
+    fn test_json_nested_single_key_missing() {
         let bd = BodyData::new(Some(r#"{"a": "b"}"#));
-        assert_eq!(bd.json_field("missing"), None);
+        let keys = vec!["missing".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), None);
+        assert_eq!(bd.json_nested_field_string(&keys), None);
     }
 
     #[test]
     fn test_no_body() {
         let bd = BodyData::new(None);
-        assert_eq!(bd.json_field("anything"), None);
+        let keys = vec!["anything".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), None);
+        assert_eq!(bd.json_nested_field_string(&keys), None);
     }
 
     #[test]
     fn test_invalid_json() {
         let bd = BodyData::new(Some("not json"));
-        assert_eq!(bd.json_field("anything"), None);
+        let keys = vec!["anything".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), None);
     }
 
     #[test]
@@ -98,23 +109,30 @@ mod tests {
     }
 
     #[test]
-    fn test_json_field_str_borrows() {
-        let bd = BodyData::new(Some(r#"{"name": "Alice"}"#));
-        // String values should be borrowable
-        assert_eq!(bd.json_field_str("name"), Some("Alice"));
+    fn test_json_nested_field_str() {
+        let bd = BodyData::new(Some(r#"{"user": {"profile": {"name": "Alice"}}}"#));
+        let keys = vec!["user".to_string(), "profile".to_string(), "name".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), Some("Alice"));
     }
 
     #[test]
-    fn test_json_field_str_returns_none_for_number() {
-        let bd = BodyData::new(Some(r#"{"count": 42}"#));
-        // Non-string values return None from json_field_str
-        assert_eq!(bd.json_field_str("count"), None);
+    fn test_json_nested_field_string_number() {
+        let bd = BodyData::new(Some(r#"{"data": {"count": 42}}"#));
+        let keys = vec!["data".to_string(), "count".to_string()];
+        assert_eq!(bd.json_nested_field_string(&keys), Some("42".to_string()));
     }
 
     #[test]
-    fn test_json_field_string_number() {
-        let bd = BodyData::new(Some(r#"{"count": 42}"#));
-        // Non-string values return owned string via json_field_string
-        assert_eq!(bd.json_field_string("count"), Some("42".to_string()));
+    fn test_json_nested_field_missing() {
+        let bd = BodyData::new(Some(r#"{"user": {"name": "Alice"}}"#));
+        let keys = vec!["user".to_string(), "profile".to_string(), "name".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), None);
+    }
+
+    #[test]
+    fn test_json_nested_single_key() {
+        let bd = BodyData::new(Some(r#"{"action": "delete"}"#));
+        let keys = vec!["action".to_string()];
+        assert_eq!(bd.json_nested_field_str(&keys), Some("delete"));
     }
 }

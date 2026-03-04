@@ -26,11 +26,12 @@ module Rack
           @available
         end
 
-        def compile_ruleset(rules_array, jwt_keys: nil)
+        def compile_ruleset(rules_array, jwt_keys: nil, rule_order: nil)
           return nil unless available?
 
           json_data = { "rules" => rules_array }
           json_data["jwt_keys"] = jwt_keys if jwt_keys
+          json_data["rule_order"] = rule_order if rule_order
 
           begin
             rule_set = RackAttackNative::RuleSet.from_json(JSON.generate(json_data))

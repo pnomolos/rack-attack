@@ -47,8 +47,8 @@ pub enum Field {
     QueryParam(String),
     /// Raw request body
     BodyRaw,
-    /// JSON body field: `http.request.body.json["key"]`
-    BodyJsonField(String),
+    /// JSON body field: `http.request.body.json["key"]` or nested `http.request.body.json["a.b.c"]`
+    BodyJsonField(Vec<String>),
     /// Unverified JWT payload claim: `jwt.payload["claim"]`
     JwtPayload(String),
     /// Unverified JWT header field: `jwt.header["field"]`
@@ -125,7 +125,8 @@ impl Field {
                 }
                 if let Some(rest) = s.strip_prefix("http.request.body.json[\"") {
                     if let Some(name) = rest.strip_suffix("\"]") {
-                        return Ok(Field::BodyJsonField(name.to_string()));
+                        let keys: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
+                        return Ok(Field::BodyJsonField(keys));
                     }
                 }
                 if let Some(rest) = s.strip_prefix("jwt.payload[\"") {
@@ -225,12 +226,12 @@ impl Field {
                 FieldValue::OptStr(ctx.body.raw().map(Cow::Borrowed))
             }
 
-            // JSON body field — try zero-copy borrow for string values first
-            Field::BodyJsonField(key) => {
-                if let Some(s) = ctx.body.json_field_str(key) {
+            // JSON body field — supports nested access via dot-separated keys
+            Field::BodyJsonField(keys) => {
+                if let Some(s) = ctx.body.json_nested_field_str(keys) {
                     FieldValue::OptStr(Some(Cow::Borrowed(s)))
                 } else {
-                    FieldValue::OptStr(ctx.body.json_field_string(key).map(Cow::Owned))
+                    FieldValue::OptStr(ctx.body.json_nested_field_string(keys).map(Cow::Owned))
                 }
             }
 
@@ -418,7 +419,15 @@ mod tests {
     #[test]
     fn test_parse_body_json_field() {
         match Field::parse("http.request.body.json[\"user_id\"]").unwrap() {
-            Field::BodyJsonField(name) => assert_eq!(name, "user_id"),
+            Field::BodyJsonField(keys) => assert_eq!(keys, vec!["user_id"]),
+            other => panic!("Expected BodyJsonField, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_body_json_nested_field() {
+        match Field::parse("http.request.body.json[\"user.profile.name\"]").unwrap() {
+            Field::BodyJsonField(keys) => assert_eq!(keys, vec!["user", "profile", "name"]),
             other => panic!("Expected BodyJsonField, got {:?}", other),
         }
     }

@@ -96,10 +96,14 @@ module Rack
 
         rules = data["rules"] || []
         jwt_config = jwt_keys || data["jwt_keys"]
-        @jwt_keys = jwt_config
+        # Only update global settings if explicitly provided in this call
+        @jwt_keys = jwt_config if jwt_config
+        @rule_order = data["rule_order"] if data.key?("rule_order")
+        # Use current @jwt_keys as fallback for rule registration
+        effective_jwt_config = jwt_config || @jwt_keys
 
         rules.each do |rule|
-          register_json_rule(rule, jwt_config: jwt_config)
+          register_json_rule(rule, jwt_config: effective_jwt_config)
         end
 
         rebuild_native_ruleset!
@@ -271,6 +275,7 @@ module Rack
         @json_rules = []
         @json_rule_names = Set.new
         @jwt_keys = nil
+        @rule_order = nil
         @native_ruleset = nil
       end
 
@@ -300,6 +305,9 @@ module Rack
       end
 
       def register_json_rule(json_rule, jwt_config:)
+        # Skip disabled rules
+        return if json_rule["enabled"] == false
+
         name = json_rule["name"]
         type = json_rule["type"]
         condition = json_rule["condition"]
@@ -437,7 +445,7 @@ module Rack
 
       def rebuild_native_ruleset!
         @native_ruleset = if @json_rules.any?
-                            NativeBridge.compile_ruleset(@json_rules, jwt_keys: @jwt_keys)
+                            NativeBridge.compile_ruleset(@json_rules, jwt_keys: @jwt_keys, rule_order: @rule_order)
                           end
       end
 
