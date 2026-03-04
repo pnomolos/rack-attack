@@ -1,0 +1,470 @@
+{
+  "rules": [
+    {
+      "name": "health-check-endpoints",
+      "type": "safelist",
+      "condition": {
+        "or": [
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/healthz" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/readiness" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/livez" }
+        ]
+      }
+    },
+    {
+      "name": "internal-network",
+      "type": "safelist",
+      "condition": {
+        "field": "ip.src", "operator": "in_ip_range",
+        "value": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"]
+      }
+    },
+    {
+      "name": "static-assets",
+      "type": "safelist",
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "GET" },
+          { "field": "http.request.uri.path.extension", "operator": "in", "value": ["css", "js", "png", "jpg", "jpeg", "gif", "ico", "svg", "woff", "woff2", "ttf", "eot", "map"] }
+        ]
+      }
+    },
+    {
+      "name": "trusted-api-key",
+      "type": "safelist",
+      "condition": {
+        "field": "http.request.headers[\"x-service-api-key\"]", "operator": "eq",
+        "value": "trusted-internal-service-key-abc123"
+      }
+    },
+    {
+      "name": "load-balancer-probe",
+      "type": "safelist",
+      "condition": {
+        "or": [
+          { "field": "http.user_agent", "operator": "starts_with", "value": "ELB-HealthChecker" },
+          { "field": "http.user_agent", "operator": "starts_with", "value": "kube-probe" }
+        ]
+      }
+    },
+
+    {
+      "name": "known-bad-ips",
+      "type": "blocklist",
+      "condition": {
+        "field": "ip.src", "operator": "in",
+        "value": [
+          "203.0.113.50", "198.51.100.99", "192.0.2.42", "10.99.99.1", "172.16.255.1",
+          "203.0.113.51", "198.51.100.100", "192.0.2.43", "10.99.99.2", "172.16.255.2"
+        ]
+      }
+    },
+    {
+      "name": "known-bad-cidrs",
+      "type": "blocklist",
+      "condition": {
+        "field": "ip.src", "operator": "in_ip_range",
+        "value": ["198.18.0.0/15", "100.64.0.0/10", "192.88.99.0/24"]
+      }
+    },
+    {
+      "name": "blocked-user-agents",
+      "type": "blocklist",
+      "condition": {
+        "field": "http.user_agent", "operator": "matches",
+        "value": "\\b(ahrefsbot|semrushbot|mj12bot|dotbot|blexbot)\\b",
+        "transform": "lower"
+      }
+    },
+    {
+      "name": "sensitive-paths",
+      "type": "blocklist",
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "matches", "value": "(?i)^/(admin|internal|debug|monitoring|actuator|\\.env|\\.git|wp-admin|phpMyAdmin)" },
+          { "not": { "field": "ip.src", "operator": "in_ip_range", "value": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8"] } }
+        ]
+      }
+    },
+    {
+      "name": "sql-injection-probes",
+      "type": "blocklist",
+      "condition": {
+        "field": "http.request.uri.query", "operator": "matches",
+        "value": "(\\bunion\\b.*\\bselect\\b|\\bor\\b\\s+1\\s*=\\s*1|\\bdrop\\b\\s+\\btable\\b)",
+        "transform": ["url_decode", "lower"]
+      }
+    },
+    {
+      "name": "path-traversal",
+      "type": "blocklist",
+      "condition": {
+        "field": "http.request.uri.path", "operator": "contains", "value": "..",
+        "transform": "url_decode"
+      }
+    },
+    {
+      "name": "missing-ua-on-api",
+      "type": "blocklist",
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/" },
+          { "field": "http.user_agent", "operator": "not_exists" }
+        ]
+      }
+    },
+    {
+      "name": "readonly-endpoint-writes",
+      "type": "blocklist",
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/v1/public/" },
+          { "field": "http.request.method", "operator": "not_in", "value": ["GET", "HEAD", "OPTIONS"] }
+        ]
+      }
+    },
+    {
+      "name": "oversized-body",
+      "type": "blocklist",
+      "condition": {
+        "field": "http.request.body.size", "operator": "gt", "value": 10485760
+      }
+    },
+
+    {
+      "name": "global/ip",
+      "type": "throttle",
+      "limit": 300,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": null
+    },
+    {
+      "name": "api/ip",
+      "type": "throttle",
+      "limit": 100,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": {
+        "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/"
+      }
+    },
+    {
+      "name": "login/ip",
+      "type": "throttle",
+      "limit": 5,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "login/email",
+      "type": "throttle",
+      "limit": 5,
+      "period": 300,
+      "key": ["http.request.headers[\"x-login-email\"]"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "password-reset/ip",
+      "type": "throttle",
+      "limit": 3,
+      "period": 1800,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/password-reset" }
+        ]
+      }
+    },
+    {
+      "name": "registration/ip",
+      "type": "throttle",
+      "limit": 3,
+      "period": 3600,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/register" }
+        ]
+      }
+    },
+    {
+      "name": "search/ip",
+      "type": "throttle",
+      "limit": 20,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "GET" },
+          { "field": "http.request.uri.path", "operator": "matches", "value": "^/api/v[0-9]+/search$" }
+        ]
+      }
+    },
+    {
+      "name": "upload/ip",
+      "type": "throttle",
+      "limit": 10,
+      "period": 300,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "matches", "value": "^/api/v[0-9]+/uploads$" }
+        ]
+      }
+    },
+    {
+      "name": "graphql/ip",
+      "type": "throttle",
+      "limit": 60,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/graphql" }
+        ]
+      }
+    },
+    {
+      "name": "webhooks/ip",
+      "type": "throttle",
+      "limit": 30,
+      "period": 60,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/webhooks/" }
+        ]
+      }
+    },
+    {
+      "name": "auth-bruteforce/level-1",
+      "type": "throttle",
+      "limit": 6,
+      "period": 30,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "auth-bruteforce/level-2",
+      "type": "throttle",
+      "limit": 12,
+      "period": 900,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "auth-bruteforce/level-3",
+      "type": "throttle",
+      "limit": 18,
+      "period": 27000,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "auth-bruteforce/level-4",
+      "type": "throttle",
+      "limit": 24,
+      "period": 810000,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "auth-bruteforce/level-5",
+      "type": "throttle",
+      "limit": 30,
+      "period": 24300000,
+      "key": ["ip.src"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "eq", "value": "POST" },
+          { "field": "http.request.uri.path", "operator": "eq", "value": "/auth/login" }
+        ]
+      }
+    },
+    {
+      "name": "session/writes",
+      "type": "throttle",
+      "limit": 30,
+      "period": 60,
+      "key": ["http.request.cookies[\"_session_id\"]"],
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "in", "value": ["POST", "PUT", "PATCH", "DELETE"] },
+          { "field": "http.request.cookies[\"_session_id\"]", "operator": "exists" }
+        ]
+      }
+    },
+    {
+      "name": "api/key",
+      "type": "throttle",
+      "limit": 1000,
+      "period": 3600,
+      "key": ["http.request.headers[\"x-api-key\"]"],
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/" },
+          { "field": "http.request.headers[\"x-api-key\"]", "operator": "exists" }
+        ]
+      }
+    },
+    {
+      "name": "origin/rate",
+      "type": "throttle",
+      "limit": 100,
+      "period": 60,
+      "key": ["http.request.headers[\"origin\"]"],
+      "condition": {
+        "and": [
+          { "field": "http.request.headers[\"origin\"]", "operator": "exists" },
+          { "not": { "field": "http.request.headers[\"origin\"]", "operator": "ends_with", "value": ".example.com" } }
+        ]
+      }
+    },
+
+    {
+      "name": "api-version",
+      "type": "track",
+      "condition": {
+        "field": "http.request.uri.path", "operator": "matches",
+        "value": "^/api/v[0-9]+/"
+      }
+    },
+    {
+      "name": "admin-access",
+      "type": "track",
+      "condition": {
+        "field": "http.request.uri.path", "operator": "starts_with", "value": "/admin"
+      }
+    },
+    {
+      "name": "deprecated-endpoints",
+      "type": "track",
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/v1/" },
+          { "field": "http.request.uri.path", "operator": "matches", "value": "/api/v1/(legacy|old|deprecated)" }
+        ]
+      }
+    },
+    {
+      "name": "high-rate-monitor",
+      "type": "track",
+      "condition": null
+    },
+    {
+      "name": "unusual-methods",
+      "type": "track",
+      "condition": {
+        "field": "http.request.method", "operator": "not_in",
+        "value": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+      }
+    },
+    {
+      "name": "cookieless-api",
+      "type": "track",
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/" },
+          { "field": "http.request.cookies[\"_session_id\"]", "operator": "not_exists" }
+        ]
+      }
+    },
+    {
+      "name": "geo-suspicious",
+      "type": "track",
+      "condition": {
+        "field": "ip.src", "operator": "in_ip_range",
+        "value": ["45.0.0.0/8", "46.0.0.0/8"]
+      }
+    },
+    {
+      "name": "api-wildcard-track",
+      "type": "track",
+      "condition": {
+        "field": "http.request.uri.path", "operator": "wildcard",
+        "value": "/api/*/users/*"
+      }
+    },
+    {
+      "name": "json-mutation-track",
+      "type": "track",
+      "condition": {
+        "and": [
+          { "field": "http.request.method", "operator": "in", "value": ["POST", "PUT", "PATCH"] },
+          { "field": "http.request.body.json[\"action\"]", "operator": "exists" }
+        ]
+      }
+    },
+
+    {
+      "name": "jwt-sub-throttle",
+      "type": "throttle",
+      "limit": 100,
+      "period": 60,
+      "key": ["jwt.payload[\"sub\"]"],
+      "condition": {
+        "and": [
+          { "field": "http.request.uri.path", "operator": "starts_with", "value": "/api/" },
+          { "field": "jwt.payload[\"sub\"]", "operator": "exists" }
+        ]
+      }
+    },
+    {
+      "name": "jwt-wrong-audience",
+      "type": "track",
+      "condition": {
+        "and": [
+          { "field": "jwt.payload[\"aud\"]", "operator": "exists" },
+          { "field": "jwt.payload[\"aud\"]", "operator": "ne", "value": "api.example.com" }
+        ]
+      }
+    },
+    {
+      "name": "jwt-expired-block",
+      "type": "blocklist",
+      "condition": {
+        "and": [
+          { "field": "jwt.payload[\"sub\"]", "operator": "exists" },
+          { "field": "jwt.valid", "operator": "not_exists" }
+        ]
+      }
+    }
+  ]
+}
