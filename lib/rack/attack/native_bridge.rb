@@ -5,6 +5,12 @@ require "set"
 module Rack
   class Attack
     module NativeBridge
+      # Maximum body bytes forwarded to the native engine.
+      # Prevents reading a multi-GB upload entirely into memory when a rule
+      # only needs to inspect the first portion (e.g., an oversized-body rule
+      # that fires at the 10 MB threshold).
+      MAX_BODY_SIZE = 10 * 1024 * 1024 # 10 MB
+
       @available = nil
 
       class << self
@@ -59,7 +65,8 @@ module Rack
 
           if required_fields.include?("body") && request.body
             request.body.rewind
-            data["body"] = request.body.read
+            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
+            data["body"] = request.body.read(MAX_BODY_SIZE)
             request.body.rewind
           end
 
@@ -105,7 +112,8 @@ module Rack
           body = nil
           if request.body
             request.body.rewind
-            body = request.body.read
+            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
+            body = request.body.read(MAX_BODY_SIZE)
             request.body.rewind
           end
 

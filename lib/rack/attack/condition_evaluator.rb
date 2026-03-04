@@ -7,6 +7,17 @@ require "json"
 module Rack
   class Attack
     module ConditionEvaluator
+      # Maximum body bytes read to prevent exhausting memory on large uploads.
+      # Rules that inspect body content (body.raw, body.json) will only see up
+      # to this many bytes. This matches the common "oversized-body" rule threshold.
+      MAX_BODY_SIZE = 10 * 1024 * 1024 # 10 MB
+
+      # Thread-safe cache for compiled Regexp objects, keyed by pattern string.
+      # Avoids recompiling the same pattern on every request evaluation.
+      REGEX_CACHE_MUTEX = Mutex.new
+      REGEX_CACHE_MAX   = 1000
+      @regex_cache = {}
+
       class << self
         def match?(condition, request, jwt_config: nil)
           return true if condition.nil?
@@ -21,6 +32,21 @@ module Rack
           return nil if parts.any?(&:nil?)
 
           parts.join(":")
+        end
+
+        # Returns a cached Regexp for +pattern+, compiling it only on first use.
+        # Raises RegexpError for invalid patterns (callers should rescue as needed).
+        # The cache is bounded to REGEX_CACHE_MAX entries; once full, new patterns
+        # are compiled fresh without being stored (simple eviction-free cap).
+        def compile_regex(pattern)
+          REGEX_CACHE_MUTEX.synchronize do
+            cached = @regex_cache[pattern]
+            return cached if cached
+
+            compiled = Regexp.new(pattern)
+            @regex_cache[pattern] = compiled if @regex_cache.size < REGEX_CACHE_MAX
+            compiled
+          end
         end
       end
 
@@ -78,7 +104,8 @@ module Rack
             return nil unless body
 
             body.rewind
-            content = body.read
+            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
+            content = body.read(MAX_BODY_SIZE)
             body.rewind
             content
           when /\Ahttp\.request\.headers\["([^"]+)"\]\z/
@@ -194,7 +221,7 @@ module Rack
             field_val.end_with?(comparison_val.to_s)
           when "matches"
             begin
-              !!(field_val =~ Regexp.new(comparison_val.to_s))
+              !!(field_val =~ ConditionEvaluator.compile_regex(comparison_val.to_s))
             rescue RegexpError
               false
             end
@@ -248,7 +275,8 @@ module Rack
             return nil unless body
 
             body.rewind
-            content = body.read
+            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
+            content = body.read(MAX_BODY_SIZE)
             body.rewind
             return nil if content.nil? || content.empty?
 

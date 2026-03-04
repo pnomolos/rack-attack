@@ -82,10 +82,18 @@ module Rack
         @tracks[name] = Track.new(name, options, &block)
       end
 
-      def load_ruleset(source, replace: false, jwt_keys: nil)
+      def load_ruleset(source, replace: false, jwt_keys: nil, validate: false)
         clear_configuration if replace
 
         data = parse_source(source)
+
+        if validate
+          errors = RulesetValidator.new(data).validate
+          unless errors.empty?
+            raise ArgumentError, "Invalid ruleset: #{errors.join('; ')}"
+          end
+        end
+
         rules = data["rules"] || []
         jwt_config = jwt_keys || data["jwt_keys"]
         @jwt_keys = jwt_config
