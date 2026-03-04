@@ -24,6 +24,8 @@ require "rack"
 require "rack/attack/condition_evaluator"
 require "json"
 require "stringio"
+require "openssl"
+require "jwt"
 require "rack_attack_native"
 
 class ConformanceSpec < Minitest::Test
@@ -85,17 +87,24 @@ class ConformanceSpec < Minitest::Test
     native[:headers] = (data[:headers] || {}).transform_keys { |k| k.downcase.tr("_", "-") }
     native[:cookies] = data[:cookies] || {}
     native[:body] = data[:body] if data[:body]
+
+    # Authorization header needs special handling for JWT: the native engine
+    # expects it as a top-level :authorization key, not inside :headers.
+    if data[:headers]&.key?("Authorization")
+      native[:authorization] = data[:headers]["Authorization"]
+    end
+
     native
   end
 
-  def eval_ruby_condition(condition, data)
+  def eval_ruby_condition(condition, data, jwt_config: nil)
     env = build_rack_env(data)
     request = Rack::Request.new(env)
-    Rack::Attack::ConditionEvaluator.match?(condition, request)
+    Rack::Attack::ConditionEvaluator.match?(condition, request, jwt_config: jwt_config)
   end
 
   def eval_native_condition(condition, data, rule_type: "track", rule_name: "test-rule",
-                            key: nil, limit: nil, period: nil)
+                            key: nil, limit: nil, period: nil, jwt_keys: nil)
     rule = {
       "name" => rule_name,
       "type" => rule_type,
@@ -105,7 +114,10 @@ class ConformanceSpec < Minitest::Test
     rule["limit"] = limit if limit
     rule["period"] = period if period
 
-    json = JSON.generate({ "rules" => [rule] })
+    ruleset_hash = { "rules" => [rule] }
+    ruleset_hash["jwt_keys"] = jwt_keys if jwt_keys
+
+    json = JSON.generate(ruleset_hash)
     rs = RackAttackNative::RuleSet.from_json(json)
     native_data = build_native_data(data)
     result = rs.evaluate(native_data)
@@ -125,11 +137,13 @@ class ConformanceSpec < Minitest::Test
   # Convenience: assert both engines agree on match/no-match
   def assert_conformance(condition, data, expected, msg = nil,
                          rule_type: "track", rule_name: "test-rule",
-                         key: nil, limit: nil, period: nil)
-    ruby_result = eval_ruby_condition(condition, data)
+                         key: nil, limit: nil, period: nil,
+                         jwt_config: nil, jwt_keys: nil)
+    ruby_result = eval_ruby_condition(condition, data, jwt_config: jwt_config)
     native_result = eval_native_condition(condition, data,
                                           rule_type: rule_type, rule_name: rule_name,
-                                          key: key, limit: limit, period: period)
+                                          key: key, limit: limit, period: period,
+                                          jwt_keys: jwt_keys)
 
     label = msg || "condition=#{condition.inspect}, data keys=#{data.keys}"
     assert_equal expected, ruby_result, "Ruby engine: #{label}"
@@ -938,5 +952,300 @@ class ConformanceSpec < Minitest::Test
   def test_uri_without_query
     cond = { "field" => "http.request.uri", "operator" => "eq", "value" => "/api/users" }
     assert_conformance(cond, { path: "/api/users", query_string: "" }, true, "uri without query")
+  end
+
+  # ===========================================================================
+  # JWT conformance
+  # ===========================================================================
+
+  # Shared JWT fixtures — generated once per test run.
+  RSA_PRIVATE = OpenSSL::PKey::RSA.generate(2048)
+  RSA_PUBLIC  = RSA_PRIVATE.public_key
+
+  HMAC_SECRET = "test-hmac-secret-key-for-conformance"
+
+  JWT_VALID_RS256 = JWT.encode(
+    { "sub" => "user_42", "iss" => "auth.example.com", "aud" => "api.example.com",
+      "exp" => Time.now.to_i + 3600, "iat" => Time.now.to_i, "role" => "admin" },
+    RSA_PRIVATE, "RS256"
+  )
+
+  JWT_VALID_HS256 = JWT.encode(
+    { "sub" => "user_99", "iss" => "auth.example.com", "aud" => "api.example.com",
+      "exp" => Time.now.to_i + 3600, "iat" => Time.now.to_i, "role" => "viewer" },
+    HMAC_SECRET, "HS256"
+  )
+
+  JWT_EXPIRED = JWT.encode(
+    { "sub" => "user_expired", "iss" => "auth.example.com",
+      "exp" => Time.now.to_i - 3600, "iat" => Time.now.to_i - 7200 },
+    RSA_PRIVATE, "RS256"
+  )
+
+  JWT_WRONG_KEY = JWT.encode(
+    { "sub" => "user_wrong", "exp" => Time.now.to_i + 3600 },
+    OpenSSL::PKey::RSA.generate(2048), "RS256"
+  )
+
+  RS256_CONFIG  = [{ "algorithm" => "RS256", "key" => RSA_PUBLIC.to_pem }]
+  HS256_CONFIG  = [{ "algorithm" => "HS256", "key" => HMAC_SECRET }]
+
+  def jwt_request(token)
+    { path: "/api/v2/resource", headers: { "Authorization" => "Bearer #{token}" } }
+  end
+
+  # --- Unverified payload access (base64 decode, no sig check) ---
+
+  def test_jwt_payload_sub_exists
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "exists" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.payload[sub] exists for valid token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_sub_eq
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "eq", "value" => "user_42" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.payload[sub] eq user_42",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_sub_ne
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "ne", "value" => "user_other" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.payload[sub] ne user_other",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_sub_no_match
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "eq", "value" => "user_999" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), false,
+                       "jwt.payload[sub] eq wrong value",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_role
+    cond = { "field" => 'jwt.payload["role"]', "operator" => "eq", "value" => "admin" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.payload[role] eq admin",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_missing_claim
+    cond = { "field" => 'jwt.payload["nonexistent"]', "operator" => "exists" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), false,
+                       "jwt.payload[nonexistent] does not exist",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_iss
+    cond = { "field" => 'jwt.payload["iss"]', "operator" => "eq", "value" => "auth.example.com" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.payload[iss] matches issuer",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_payload_aud_ne
+    cond = {
+      "and" => [
+        { "field" => 'jwt.payload["aud"]', "operator" => "exists" },
+        { "field" => 'jwt.payload["aud"]', "operator" => "ne", "value" => "api.example.com" },
+      ],
+    }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), false,
+                       "jwt.payload[aud] is api.example.com so ne fails",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- Unverified payload with expired token (should still decode) ---
+
+  def test_jwt_payload_expired_token_still_decodes
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "eq", "value" => "user_expired" }
+    assert_conformance(cond, jwt_request(JWT_EXPIRED), true,
+                       "unverified decode works on expired tokens",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- JWT header access ---
+
+  def test_jwt_header_alg
+    cond = { "field" => 'jwt.header["alg"]', "operator" => "eq", "value" => "RS256" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.header[alg] eq RS256",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_header_typ_absent
+    # Ruby's JWT gem does not include "typ" in the encoded header by default.
+    # Both engines decode the same token, so both see no "typ" field.
+    cond = { "field" => 'jwt.header["typ"]', "operator" => "exists" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), false,
+                       "jwt.header[typ] not present (Ruby JWT gem omits it)",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- Verified payload (signature check) ---
+
+  def test_jwt_verified_payload_valid_rs256
+    cond = { "field" => 'jwt.verified_payload["sub"]', "operator" => "eq", "value" => "user_42" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.verified_payload[sub] with valid RS256 token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_verified_payload_expired_token
+    # Expired token should fail verification -> verified_payload not accessible
+    cond = { "field" => 'jwt.verified_payload["sub"]', "operator" => "exists" }
+    assert_conformance(cond, jwt_request(JWT_EXPIRED), false,
+                       "jwt.verified_payload not available for expired token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_verified_payload_wrong_key
+    # Token signed with a different key -> verification fails
+    cond = { "field" => 'jwt.verified_payload["sub"]', "operator" => "exists" }
+    assert_conformance(cond, jwt_request(JWT_WRONG_KEY), false,
+                       "jwt.verified_payload not available for wrong-key token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- jwt.valid field ---
+
+  def test_jwt_valid_true
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "jwt.valid is true for valid RS256 token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_valid_false_expired
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_EXPIRED), false,
+                       "jwt.valid is not true for expired token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_valid_false_wrong_key
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_WRONG_KEY), false,
+                       "jwt.valid is not true for wrong-key token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- HMAC (HS256) algorithm ---
+
+  def test_jwt_hs256_payload
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "eq", "value" => "user_99" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), true,
+                       "jwt.payload[sub] with HS256 token",
+                       jwt_config: HS256_CONFIG, jwt_keys: HS256_CONFIG)
+  end
+
+  def test_jwt_hs256_verified_payload
+    cond = { "field" => 'jwt.verified_payload["sub"]', "operator" => "eq", "value" => "user_99" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), true,
+                       "jwt.verified_payload[sub] with HS256 token",
+                       jwt_config: HS256_CONFIG, jwt_keys: HS256_CONFIG)
+  end
+
+  def test_jwt_hs256_valid
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), true,
+                       "jwt.valid is true for valid HS256 token",
+                       jwt_config: HS256_CONFIG, jwt_keys: HS256_CONFIG)
+  end
+
+  def test_jwt_hs256_wrong_secret
+    wrong_config = [{ "algorithm" => "HS256", "key" => "wrong-secret" }]
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), false,
+                       "jwt.valid is false with wrong HMAC secret",
+                       jwt_config: wrong_config, jwt_keys: wrong_config)
+  end
+
+  # --- No token / no Authorization header ---
+
+  def test_jwt_no_token_payload_not_exists
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "exists" }
+    assert_conformance(cond, { path: "/api/v2/resource" }, false,
+                       "jwt.payload[sub] not exists when no Authorization header",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_no_token_valid_not_true
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, { path: "/api/v2/resource" }, false,
+                       "jwt.valid is not true when no token",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_non_bearer_auth_header
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "exists" }
+    data = { path: "/api/v2/resource", headers: { "Authorization" => "Basic dXNlcjpwYXNz" } }
+    assert_conformance(cond, data, false,
+                       "jwt.payload not available for Basic auth",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- JWT in compound conditions ---
+
+  def test_jwt_throttle_by_sub
+    cond = {
+      "and" => [
+        { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/api/" },
+        { "field" => 'jwt.payload["sub"]', "operator" => "exists" },
+      ],
+    }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), true,
+                       "JWT sub exists in compound condition",
+                       rule_type: "throttle", rule_name: "jwt-throttle",
+                       key: ['jwt.payload["sub"]'], limit: 100, period: 60,
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_blocklist_expired
+    # Block requests with expired JWTs: jwt.payload[sub] exists but jwt.valid != true
+    cond = {
+      "and" => [
+        { "field" => 'jwt.payload["sub"]', "operator" => "exists" },
+        { "not" => { "field" => "jwt.valid", "operator" => "eq", "value" => "true" } },
+      ],
+    }
+    assert_conformance(cond, jwt_request(JWT_EXPIRED), true,
+                       "blocklist expired JWT: sub exists but not valid",
+                       rule_type: "blocklist", rule_name: "jwt-expired-block",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_blocklist_valid_not_blocked
+    # Valid JWT should NOT be blocked by the expired-JWT rule
+    cond = {
+      "and" => [
+        { "field" => 'jwt.payload["sub"]', "operator" => "exists" },
+        { "not" => { "field" => "jwt.valid", "operator" => "eq", "value" => "true" } },
+      ],
+    }
+    assert_conformance(cond, jwt_request(JWT_VALID_RS256), false,
+                       "valid JWT not blocked by expired-JWT rule",
+                       rule_type: "blocklist", rule_name: "jwt-expired-block",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  # --- RS256 cross-verification: HS256 token with RS256 config ---
+
+  def test_jwt_rs256_config_hs256_token_unverified
+    # Unverified decode should still work regardless of key config
+    cond = { "field" => 'jwt.payload["sub"]', "operator" => "eq", "value" => "user_99" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), true,
+                       "unverified decode works with mismatched key config",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
+  end
+
+  def test_jwt_rs256_config_hs256_token_verified_fails
+    # Verification should fail: HS256 token can't be verified with RS256 key
+    cond = { "field" => "jwt.valid", "operator" => "eq", "value" => "true" }
+    assert_conformance(cond, jwt_request(JWT_VALID_HS256), false,
+                       "HS256 token not valid with RS256 config",
+                       jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
   end
 end
