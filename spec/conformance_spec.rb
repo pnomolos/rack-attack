@@ -849,18 +849,10 @@ class ConformanceSpec < Minitest::Test
   # ===========================================================================
 
   def test_path_extension_dotfile
-    # Dotfiles like ".env" — Ruby File.extname(".env") returns "" (no extension).
-    # Known divergence: native may return "env". Document this.
+    # Dotfiles like ".env" — both Ruby File.extname(".env") and native now return ""
+    # (no extension). The native side was fixed to match Ruby's behavior.
     cond = { "field" => "http.request.uri.path.extension", "operator" => "exists" }
-    ruby_result = eval_ruby_condition(cond, { path: "/.env" })
-    native_result = eval_native_condition(cond, { path: "/.env" })
-
-    if ruby_result != native_result
-      skip "KNOWN DIVERGENCE: dotfile extension — Ruby File.extname('/.env')='' (no ext), " \
-           "native may return 'env'. Ruby=#{ruby_result}, Native=#{native_result}"
-    else
-      assert_equal ruby_result, native_result, "dotfile extension"
-    end
+    assert_conformance(cond, { path: "/.env" }, false, "dotfile .env has no extension")
   end
 
   def test_path_extension_double_dot
@@ -884,18 +876,10 @@ class ConformanceSpec < Minitest::Test
   end
 
   def test_wildcard_case_sensitivity
-    # Ruby File.fnmatch with FNM_PATHNAME is case-sensitive.
-    # Native glob_match may differ. Check for divergence.
+    # Both Ruby File.fnmatch(FNM_PATHNAME) and native glob_match are case-sensitive.
+    # "/assets/*.js" should NOT match "/assets/APP.JS".
     cond = { "field" => "http.request.uri.path", "operator" => "wildcard", "value" => "/assets/*.js" }
-    ruby_result = eval_ruby_condition(cond, { path: "/assets/APP.JS" })
-    native_result = eval_native_condition(cond, { path: "/assets/APP.JS" })
-
-    if ruby_result != native_result
-      skip "KNOWN DIVERGENCE: wildcard case sensitivity — Ruby File.fnmatch is case-sensitive, " \
-           "native glob_match may be case-insensitive. Ruby=#{ruby_result}, Native=#{native_result}"
-    else
-      assert_equal ruby_result, native_result, "wildcard case sensitivity"
-    end
+    assert_conformance(cond, { path: "/assets/APP.JS" }, false, "wildcard is case-sensitive")
   end
 
   # ===========================================================================

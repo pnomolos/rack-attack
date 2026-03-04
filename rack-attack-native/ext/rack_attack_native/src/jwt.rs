@@ -138,20 +138,21 @@ impl<'a> JwtData<'a> {
     pub fn new(authorization: Option<&'a str>, config: Option<&'a JwtConfig>) -> Self {
         // Case-insensitive "Bearer" prefix with flexible whitespace (matches Ruby regex /\ABearer\s+(.+)\z/i)
         let token = authorization.and_then(|auth| {
-            let trimmed = auth.trim();
-            // Match Ruby regex /\ABearer\s+(.+)\z/i: case-insensitive "bearer"
-            // followed by one or more ASCII whitespace characters (space, tab, etc.)
-            if trimmed.len() > 6
-                && trimmed[..6].eq_ignore_ascii_case("bearer")
+            // Match Ruby regex /\ABearer\s+(.+)\z/i: anchored at start (no leading
+            // whitespace allowed), case-insensitive "bearer" followed by one or more
+            // ASCII whitespace characters (space, tab, etc.), then the token.
+            // Trailing whitespace is stripped to be lenient on the token value.
+            if auth.len() > 6
+                && auth[..6].eq_ignore_ascii_case("bearer")
             {
-                let after_bearer = &trimmed[6..];
+                let after_bearer = &auth[6..];
                 // Require at least one whitespace char after "bearer"
                 if after_bearer.is_empty()
                     || !after_bearer.as_bytes()[0].is_ascii_whitespace()
                 {
                     return None;
                 }
-                let token = after_bearer.trim_start();
+                let token = after_bearer.trim();
                 if token.is_empty() {
                     None
                 } else {

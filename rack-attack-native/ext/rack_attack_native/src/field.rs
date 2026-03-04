@@ -280,7 +280,8 @@ fn apply_one_transform<'a>(val: FieldValue<'a>, transform: &Transform) -> FieldV
                 FieldValue::Str(cow) => FieldValue::Number(cow.len() as u64),
                 FieldValue::OptStr(Some(cow)) => FieldValue::Number(cow.len() as u64),
                 FieldValue::OptStr(None) => FieldValue::Number(0),
-                FieldValue::Number(_) => val, // length of a number is itself
+                // Ruby: "42".length => 2.  Stringify the number first, then take its length.
+                FieldValue::Number(n) => FieldValue::Number(n.to_string().len() as u64),
             }
         }
         Transform::Lower => match val {

@@ -36,17 +36,25 @@ module Rack
 
         # Returns a cached Regexp for +pattern+, compiling it only on first use.
         # Raises RegexpError for invalid patterns (callers should rescue as needed).
-        # The cache is bounded to REGEX_CACHE_MAX entries; once full, new patterns
-        # are compiled fresh without being stored (simple eviction-free cap).
+        # The cache is bounded to REGEX_CACHE_MAX entries; when full it is cleared
+        # entirely and repopulated from scratch (simple but avoids both unbounded
+        # growth and the performance cliff of never caching new patterns).
         def compile_regex(pattern)
           REGEX_CACHE_MUTEX.synchronize do
             cached = @regex_cache[pattern]
             return cached if cached
 
             compiled = Regexp.new(pattern)
-            @regex_cache[pattern] = compiled if @regex_cache.size < REGEX_CACHE_MAX
+            @regex_cache.clear if @regex_cache.size >= REGEX_CACHE_MAX
+            @regex_cache[pattern] = compiled
             compiled
           end
+        end
+
+        # Clears the compiled regex cache. Useful after reloading rulesets to
+        # free patterns from previous configurations.
+        def clear_regex_cache!
+          REGEX_CACHE_MUTEX.synchronize { @regex_cache.clear }
         end
       end
 
@@ -372,10 +380,11 @@ module Rack
         def verify_with_jwt_gem(token)
           @jwt_config.each do |key_entry|
             algorithm = key_entry["algorithm"] || key_entry[:algorithm]
-            key = key_entry["key"] || key_entry[:key]
-            next unless algorithm && key
+            raw_key = key_entry["key"] || key_entry[:key]
+            next unless algorithm && raw_key
 
             begin
+              key = coerce_jwt_key(algorithm, raw_key)
               decoded = ::JWT.decode(token, key, true, { algorithm: algorithm })
               return { "payload" => decoded[0], "header" => decoded[1] }
             rescue ::JWT::DecodeError
@@ -383,6 +392,19 @@ module Rack
             end
           end
           nil
+        end
+
+        # Coerce a raw key string into the appropriate type for the JWT gem.
+        # HMAC algorithms use the raw string; RSA/EC/PS need OpenSSL key objects.
+        def coerce_jwt_key(algorithm, raw_key)
+          case algorithm
+          when /\ARS|PS/  # RSA or PSS
+            raw_key.is_a?(String) ? OpenSSL::PKey::RSA.new(raw_key) : raw_key
+          when /\AES/     # ECDSA
+            raw_key.is_a?(String) ? OpenSSL::PKey::EC.new(raw_key) : raw_key
+          else            # HMAC (HS256, HS384, HS512)
+            raw_key
+          end
         end
       end
     end

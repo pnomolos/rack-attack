@@ -88,9 +88,9 @@ module Rack
         data = parse_source(source)
 
         if validate
-          errors = RulesetValidator.new(data).validate
-          unless errors.empty?
-            raise ArgumentError, "Invalid ruleset: #{errors.join('; ')}"
+          result = RulesetValidator.new(data).validate
+          unless result.valid?
+            raise ArgumentError, "Invalid ruleset: #{result.errors.join('; ')}"
           end
         end
 
