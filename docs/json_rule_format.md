@@ -43,6 +43,13 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
 - [Interaction with Block-Based Rules](#interaction-with-block-based-rules)
 - [Full Example](#full-example)
 - [Field Name Reference (Cloudflare Comparison)](#field-name-reference-cloudflare-comparison)
+- [Security Considerations](#security-considerations)
+  - [JWT Verification Scope](#jwt-verification-scope)
+  - [Enforcing Issuer and Audience via Conditions](#enforcing-issuer-and-audience-via-conditions)
+  - [ReDoS Risk in the Ruby Fallback Evaluator](#redos-risk-in-the-ruby-fallback-evaluator)
+  - [Request Body Size](#request-body-size)
+  - [Regex Pattern Safety Recommendations](#regex-pattern-safety-recommendations)
+- [Known Behavioral Differences Between Ruby and Rust Evaluators](#known-behavioral-differences-between-ruby-and-rust-evaluators)
 
 ## Quick Start
 
@@ -743,3 +750,144 @@ For more details on Cloudflare's rule language, see:
 - [Cloudflare Fields Reference](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/)
 - [Cloudflare Rule Operators](https://developers.cloudflare.com/ruleset-engine/rules-language/operators/)
 - [Cloudflare Rule Expressions](https://developers.cloudflare.com/ruleset-engine/rules-language/expressions/)
+
+## Security Considerations
+
+### JWT Verification Scope
+
+When the native engine verifies a JWT (accessed via `jwt.verified_payload` or `jwt.valid`), it checks:
+
+1. **Signature** — the token must be signed by one of the configured keys using the expected algorithm.
+2. **Expiration** (`exp` claim) — the token must not be expired.
+
+It does **not** automatically validate:
+
+- `iss` (issuer) — which system issued the token
+- `aud` (audience) — which service the token is intended for
+- `nbf` (not before) — earliest valid time (this claim is not checked)
+- Any custom claims
+
+This is by design. Audience and issuer validation are application-specific and are best expressed as explicit rule conditions, keeping the key configuration simple and the verification fast.
+
+> **Important**: Do not rely on `jwt.valid` or `jwt.verified_payload` alone for authorization decisions. Always add conditions to enforce `iss` and/or `aud` when those claims are relevant to your security model.
+
+### Enforcing Issuer and Audience via Conditions
+
+Use `jwt.verified_payload["iss"]` and `jwt.verified_payload["aud"]` in rule conditions to enforce issuer and audience constraints. Because these use `verified_payload`, they require a valid signature — an attacker cannot forge the claim value.
+
+**Example: block requests whose token issuer is not your auth server**
+
+```json
+{
+  "name": "block-wrong-issuer",
+  "type": "blocklist",
+  "condition": {
+    "and": [
+      { "field": "jwt.valid", "operator": "exists" },
+      {
+        "not": {
+          "field": "jwt.verified_payload[\"iss\"]",
+          "operator": "eq",
+          "value": "https://auth.example.com"
+        }
+      }
+    ]
+  }
+}
+```
+
+**Example: throttle by subject, but only for tokens issued for the API audience**
+
+```json
+{
+  "name": "api/user",
+  "type": "throttle",
+  "limit": 500,
+  "period": 3600,
+  "key": ["jwt.verified_payload[\"sub\"]"],
+  "condition": {
+    "and": [
+      { "field": "jwt.verified_payload[\"aud\"]", "operator": "eq", "value": "api.example.com" },
+      { "field": "jwt.verified_payload[\"sub\"]", "operator": "exists" }
+    ]
+  }
+}
+```
+
+Note that the `aud` claim may be a JSON array in some token formats. If your tokens use an array audience, check each value individually using `in` or use the `contains` operator against a serialized representation. When in doubt, inspect the raw claim with `jwt.payload["aud"]` (no signature verification) to understand the format your tokens actually produce.
+
+### ReDoS Risk in the Ruby Fallback Evaluator
+
+The `matches` operator evaluates a regular expression against the field value. In the **native (Rust) engine**, patterns are compiled using the `regex` crate, which uses a finite automaton and guarantees linear-time matching regardless of input. It is immune to ReDoS.
+
+In the **Ruby fallback evaluator** (used when `rack-attack-native` is not installed), patterns are evaluated using Ruby's `Regexp` engine (ONIG/PCRE-like). This engine supports backtracking and is vulnerable to **catastrophic backtracking** (ReDoS) if a poorly constructed pattern is combined with adversarial input.
+
+Mitigations when using the Ruby evaluator:
+
+- Keep `matches` patterns simple. Avoid nested quantifiers like `(a+)+` or `(a|aa)+`.
+- Use `starts_with`, `ends_with`, `contains`, or `eq` operators instead of `matches` wherever possible — they use plain string operations and are not vulnerable.
+- If you need complex patterns only in the native engine, ensure `rack-attack-native` is installed and `Rack::Attack::NativeBridge.available?` returns `true` before deploying regex-heavy rulesets to production.
+- Validate patterns in CI using a tool like [regexploit](https://github.com/6e726d/regexploit) or [safe-regex](https://github.com/substack/safe-regex).
+
+### Request Body Size
+
+The `http.request.body.raw` and `http.request.body.json["key"]` fields read the full request body into memory on each evaluation. For applications that accept large uploads, this can cause high memory usage if body-matching rules fire on large requests.
+
+Mitigations:
+
+- Scope body-matching rules narrowly using `and` conditions that first check the path, method, or `Content-Type` header before accessing body fields.
+- Guard on size first using `http.request.body.size`:
+
+```json
+{
+  "and": [
+    { "field": "http.request.body.size", "operator": "lt", "value": 65536 },
+    { "field": "http.request.body.raw", "operator": "contains", "value": "UNION SELECT" }
+  ]
+}
+```
+
+- Consider setting a maximum body size in your web server or an upstream proxy rather than relying on Rack::Attack alone.
+
+### Regex Pattern Safety Recommendations
+
+When writing `matches` patterns:
+
+- **Prefer anchors**: Use `^` and `$` (or `\A` and `\z` in Ruby) to avoid unintended partial matches. The `matches` operator does not anchor patterns by default.
+- **Avoid catastrophic backtracking**: Do not write patterns like `(a*)*`, `(.+)+`, or alternation with shared prefixes like `(foo|foobar)+`.
+- **Use literal operators for simple cases**: `starts_with`, `ends_with`, `contains`, and `eq` are faster and safer than equivalent regex.
+- **Test with adversarial input**: Before deploying a new `matches` pattern, test it against long strings of repeated characters to confirm it completes quickly.
+- **Remember engine differences**: Patterns valid in Ruby's regex engine may not work in the Rust engine (see [Known Behavioral Differences](#known-behavioral-differences-between-ruby-and-rust-evaluators)).
+
+## Known Behavioral Differences Between Ruby and Rust Evaluators
+
+The Ruby fallback and the native Rust engine aim for identical results, but a small number of edge cases differ. The following table documents known differences. Those marked "being fixed" will be resolved in a future release.
+
+| Scenario | Ruby Evaluator | Rust (Native) Evaluator | Status |
+|----------|---------------|------------------------|--------|
+| `http.request.uri.path.extension` for dotfiles (e.g. `.env`) | Returns `""` (empty string) — `File.extname(".env")` returns `""` in Ruby | Returns `"env"` — the Rust implementation treats everything after the leading dot as the extension | Being fixed |
+| `Authorization` header Bearer token whitespace | Requires exactly one space after `Bearer` | Accepts any ASCII whitespace (space, tab) after `Bearer` | Being fixed |
+| Regex engine for `matches` operator | Ruby ONIG (PCRE-like): supports backreferences (`\1`), lookahead (`(?=...)`), lookbehind (`(?<=...)`) | Rust `regex` crate (RE2-like): does **not** support backreferences, lookahead, or lookbehind | By design — see below |
+
+### Regex Engine Differences in Detail
+
+The most significant behavioral difference is in the `matches` operator's regex engine.
+
+**Ruby (ONIG/PCRE-like)** supports:
+- Backreferences: `(foo)\1` matches `"foofoo"`
+- Lookahead: `foo(?=bar)` matches `"foo"` only when followed by `"bar"`
+- Lookbehind: `(?<=foo)bar` matches `"bar"` only when preceded by `"foo"`
+- Possessive quantifiers and atomic groups (via ONIG)
+
+**Rust (`regex` crate / RE2-like)** does **not** support any of the above. Attempting to compile a pattern with these features will cause the condition to return false (the native engine catches the compile error and treats it as non-matching). No runtime panic occurs, but the rule silently does nothing.
+
+**Practical advice**: Write `matches` patterns using only features common to both engines:
+
+- Character classes: `[a-z]`, `\d`, `\w`, `\s`
+- Quantifiers: `*`, `+`, `?`, `{n,m}`
+- Anchors: `^`, `$`
+- Alternation: `(foo|bar)`
+- Non-capturing groups: `(?:...)`
+- Case-insensitive flag: `(?i)`
+
+Avoid patterns that require PCRE features if you want consistent behavior whether or not the native engine is installed. If you must use PCRE features, accept that the rule will silently not match when the native engine is active, and test both paths explicitly.
