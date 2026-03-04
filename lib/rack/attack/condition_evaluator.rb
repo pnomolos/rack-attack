@@ -193,7 +193,11 @@ module Rack
           when "ends_with"
             field_val.end_with?(comparison_val.to_s)
           when "matches"
-            !!(field_val =~ Regexp.new(comparison_val.to_s))
+            begin
+              !!(field_val =~ Regexp.new(comparison_val.to_s))
+            rescue RegexpError
+              false
+            end
           when "wildcard"
             File.fnmatch(comparison_val.to_s, field_val, File::FNM_PATHNAME)
           when "gt"
