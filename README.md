@@ -320,7 +320,7 @@ Rack::Attack.load_ruleset({
 })
 ```
 
-The JSON format supports 18 operators (`eq`, `in`, `matches`, `in_ip_range`, `wildcard`, etc.), field extraction from headers/cookies/query params/JWT claims, transforms (`lower`, `url_decode`, etc.), and logical combinators (`and`, `or`, `not`).
+The JSON format supports 17 operators (`eq`, `in`, `matches`, `in_ip_range`, `wildcard`, etc.), field extraction from headers/cookies/query params/JWT claims, transforms (`lower`, `url_decode`, etc.), and logical combinators (`and`, `or`, `not`).
 
 For the complete format reference, see the **[JSON Rule Format documentation](docs/json_rule_format.md)**.
 

@@ -295,7 +295,7 @@ Conditions can be composed using `and`, `or`, and `not`:
 }
 ```
 
-Combinators nest freely:
+Combinators nest freely (up to a maximum depth of 20 levels):
 
 ```json
 {
@@ -366,7 +366,6 @@ These use bracket notation to specify the key:
 | Field Pattern | Description |
 |---------------|-------------|
 | `http.request.body.raw` | Raw request body as a string |
-| `http.request.body.size` | Body size from Content-Length (numeric, returned as string) |
 | `http.request.body.json["key"]` | Value from JSON-parsed body. The body must be valid JSON. |
 
 **Note**: Body fields read and rewind `rack.input`. They are safe to use with downstream middleware that also reads the body.
@@ -537,6 +536,18 @@ You can check native engine availability at runtime:
 ```ruby
 Rack::Attack::NativeBridge.available?  # => true or false
 ```
+
+## Validating Rulesets
+
+Use `validate_ruleset` to check a ruleset for structural errors before loading:
+
+```ruby
+result = Rack::Attack.validate_ruleset(source)
+result.valid?   # => true or false
+result.errors   # => ["Rule #0: missing \"condition\"", ...]
+```
+
+The `source` parameter accepts the same formats as `load_ruleset` (file path, JSON string, or Ruby Hash). Validation checks rule types, operators, field names, transforms, throttle requirements, condition nesting depth (max 20), and JWT key structure.
 
 ## Interaction with Block-Based Rules
 
