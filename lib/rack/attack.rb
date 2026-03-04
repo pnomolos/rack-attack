@@ -31,6 +31,8 @@ module Rack
     autoload :Track,                'rack/attack/track'
     autoload :Fail2Ban,             'rack/attack/fail2ban'
     autoload :Allow2Ban,            'rack/attack/allow2ban'
+    autoload :ConditionEvaluator,   'rack/attack/condition_evaluator'
+    autoload :NativeBridge,         'rack/attack/native_bridge'
 
     class << self
       attr_accessor :enabled, :notifier, :throttle_discriminator_normalizer
@@ -82,7 +84,8 @@ module Rack
         :safelists,
         :blocklists,
         :throttles,
-        :tracks
+        :tracks,
+        :load_ruleset
       )
     end
 
