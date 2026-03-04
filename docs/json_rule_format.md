@@ -20,6 +20,8 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
   - [Blocklists](#blocklists)
   - [Throttles](#throttles)
   - [Tracks](#tracks)
+  - [Enabled/Disabled Rules](#enableddisabled-rules)
+  - [Rule Evaluation Order](#rule-evaluation-order)
 - [Conditions](#conditions)
   - [Leaf Conditions](#leaf-conditions)
   - [Logical Combinators](#logical-combinators)
@@ -174,6 +176,8 @@ Every rule is a JSON object with at least `name`, `type`, and `condition` fields
 | `limit` | integer | throttle only | Maximum number of requests allowed in the period. |
 | `period` | integer | throttle only | Time window in seconds. |
 | `key` | array of strings | throttle only | Field names used to build the throttle discriminator (see [Fields](#fields)). Defaults to `["ip.src"]`. |
+| `enabled` | boolean | no | Set to `false` to disable a rule without removing it. Defaults to `true`. |
+| `description` | string | no | Human-readable description for documentation purposes. Not used during evaluation. |
 
 ### Safelists
 
@@ -243,6 +247,48 @@ Tracks log matching requests via `ActiveSupport::Notifications` without affectin
   }
 }
 ```
+
+### Enabled/Disabled Rules
+
+Rules can be temporarily disabled without removing them from the ruleset:
+
+```json
+{
+  "name": "block-scanners",
+  "type": "blocklist",
+  "enabled": false,
+  "description": "Block known vulnerability scanners (disabled during pen testing)",
+  "condition": {
+    "field": "http.user_agent", "operator": "matches",
+    "value": "\\b(nikto|sqlmap|nmap)\\b"
+  }
+}
+```
+
+Disabled rules are completely skipped during evaluation — they have zero runtime cost.
+
+### Rule Evaluation Order
+
+By default, the native engine sorts rules within each type (safelist, blocklist, etc.) by estimated evaluation cost, placing cheaper rules first for faster short-circuit evaluation. You can override this with the top-level `rule_order` field:
+
+```json
+{
+  "rule_order": "insertion",
+  "rules": [...]
+}
+```
+
+| Value | Description |
+|-------|-------------|
+| `"cost"` | Sort by estimated evaluation cost, cheapest first (default) |
+| `"insertion"` | Preserve the order rules appear in the JSON array |
+
+Cost-based ordering is a micro-optimization that matters most for safelists and blocklists where first-match short-circuiting occurs. For throttles and tracks (which evaluate all matching rules), the ordering has minimal impact. Use `"insertion"` when you need predictable, explicit rule ordering.
+
+**Important notes:**
+
+- **Ordering is per-type, not global.** Regardless of `rule_order`, evaluation always follows: safelists → blocklists → throttles → tracks. The `rule_order` setting controls the ordering of rules *within* each type. For example, with two blocklists in insertion order, the first blocklist in the JSON array is checked first.
+- **Native engine only.** Cost-based ordering (`"cost"`) is only implemented in the native Rust engine. The pure Ruby fallback always evaluates rules in insertion order regardless of this setting. If you rely on `rule_order: "insertion"` for correctness (e.g., a specific safelist must be checked first), both engines will produce the correct result.
 
 ## Conditions
 
@@ -374,8 +420,23 @@ These use bracket notation to specify the key:
 |---------------|-------------|
 | `http.request.body.raw` | Raw request body as a string |
 | `http.request.body.json["key"]` | Value from JSON-parsed body. The body must be valid JSON. |
+| `http.request.body.json["a.b.c"]` | Nested JSON access. Dots inside the bracket key indicate nesting (equivalent to `body["a"]["b"]["c"]`). |
 
 **Note**: Body fields read and rewind `rack.input`. They are safe to use with downstream middleware that also reads the body.
+
+**Nested JSON example**:
+
+```json
+{
+  "field": "http.request.body.json[\"user.profile.role\"]",
+  "operator": "eq",
+  "value": "admin"
+}
+```
+
+For a request body of `{"user": {"profile": {"role": "admin"}}}`, this condition matches.
+
+**Limitation**: Dots inside the bracket key are always interpreted as nesting separators. There is no escape mechanism for JSON keys that contain literal dots. For example, `http.request.body.json["user.name"]` always navigates to `body["user"]["name"]` and cannot be used to access a top-level key literally named `"user.name"`. If your JSON payloads contain dotted keys, access them via the non-dotted parent key instead.
 
 ### JWT Fields
 
@@ -861,13 +922,12 @@ When writing `matches` patterns:
 
 ## Known Behavioral Differences Between Ruby and Rust Evaluators
 
-The Ruby fallback and the native Rust engine aim for identical results, but a small number of edge cases differ. The following table documents known differences. Those marked "being fixed" will be resolved in a future release.
+The Ruby fallback and the native Rust engine aim for identical results, but a small number of edge cases differ.
 
 | Scenario | Ruby Evaluator | Rust (Native) Evaluator | Status |
 |----------|---------------|------------------------|--------|
-| `http.request.uri.path.extension` for dotfiles (e.g. `.env`) | Returns `""` (empty string) — `File.extname(".env")` returns `""` in Ruby | Returns `"env"` — the Rust implementation treats everything after the leading dot as the extension | Being fixed |
-| `Authorization` header Bearer token whitespace | Requires exactly one space after `Bearer` | Accepts any ASCII whitespace (space, tab) after `Bearer` | Being fixed |
 | Regex engine for `matches` operator | Ruby ONIG (PCRE-like): supports backreferences (`\1`), lookahead (`(?=...)`), lookbehind (`(?<=...)`) | Rust `regex` crate (RE2-like): does **not** support backreferences, lookahead, or lookbehind | By design — see below |
+| `rule_order: "cost"` | Not implemented — Ruby always evaluates in insertion order | Sorts rules by estimated evaluation cost (cheapest first) | By design |
 
 ### Regex Engine Differences in Detail
 

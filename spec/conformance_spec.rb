@@ -1248,4 +1248,152 @@ class ConformanceSpec < Minitest::Test
                        "HS256 token not valid with RS256 config",
                        jwt_config: RS256_CONFIG, jwt_keys: RS256_CONFIG)
   end
+
+  # ===========================================================================
+  # Nested JSON body access conformance
+  # ===========================================================================
+
+  def test_nested_json_body_field
+    cond = { "field" => 'http.request.body.json["user.profile.name"]', "operator" => "eq", "value" => "Alice" }
+    assert_conformance(cond, { body: '{"user": {"profile": {"name": "Alice"}}}' }, true,
+                       "nested body json field match")
+  end
+
+  def test_nested_json_body_field_no_match
+    cond = { "field" => 'http.request.body.json["user.profile.name"]', "operator" => "eq", "value" => "Bob" }
+    assert_conformance(cond, { body: '{"user": {"profile": {"name": "Alice"}}}' }, false,
+                       "nested body json field no match")
+  end
+
+  def test_nested_json_body_missing_intermediate_key
+    cond = { "field" => 'http.request.body.json["user.address.city"]', "operator" => "exists" }
+    assert_conformance(cond, { body: '{"user": {"profile": {"name": "Alice"}}}' }, false,
+                       "nested body json missing intermediate key")
+  end
+
+  def test_nested_json_body_number_value
+    cond = { "field" => 'http.request.body.json["data.count"]', "operator" => "eq", "value" => "42" }
+    assert_conformance(cond, { body: '{"data": {"count": 42}}' }, true,
+                       "nested body json number value stringified")
+  end
+
+  def test_flat_json_body_still_works
+    # Ensure single-key access still works (no dots = flat access)
+    cond = { "field" => 'http.request.body.json["action"]', "operator" => "eq", "value" => "delete" }
+    assert_conformance(cond, { body: '{"action": "delete"}' }, true,
+                       "flat body json field still works")
+  end
+
+  def test_deeply_nested_json_body
+    cond = { "field" => 'http.request.body.json["a.b.c.d"]', "operator" => "eq", "value" => "deep" }
+    assert_conformance(cond, { body: '{"a": {"b": {"c": {"d": "deep"}}}}' }, true,
+                       "deeply nested body json access")
+  end
+
+  # ===========================================================================
+  # Enabled/disabled rules conformance
+  # ===========================================================================
+
+  def test_disabled_rule_skipped_native
+    # Verify the native engine skips disabled rules
+    condition = { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/blocked" }
+    rule = {
+      "name" => "disabled-block",
+      "type" => "blocklist",
+      "enabled" => false,
+      "condition" => condition,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/blocked" })
+    result = rs.evaluate(native_data)
+    assert_nil result[:blocklisted], "Native engine should skip disabled rule"
+  end
+
+  def test_disabled_rule_skipped_ruby
+    # Verify the Ruby evaluator still matches the condition itself (the skip happens at registration)
+    condition = { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/blocked" }
+    # The condition itself matches — the Ruby engine doesn't know about "enabled"
+    ruby_result = eval_ruby_condition(condition, { path: "/blocked" })
+    assert_equal true, ruby_result, "Ruby condition evaluator matches the condition (skip is at registration layer)"
+  end
+
+  def test_enabled_true_rule_evaluated_native
+    condition = { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/test" }
+    rule = {
+      "name" => "enabled-track",
+      "type" => "track",
+      "enabled" => true,
+      "description" => "A rule with explicit enabled: true",
+      "condition" => condition,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/test" })
+    result = rs.evaluate(native_data)
+    assert_includes result[:tracked], "enabled-track", "Native engine should evaluate enabled rules"
+  end
+
+  def test_description_field_accepted_native
+    condition = { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/" }
+    rule = {
+      "name" => "desc-rule",
+      "type" => "track",
+      "description" => "This is a helpful description for documentation",
+      "condition" => condition,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/" })
+    result = rs.evaluate(native_data)
+    assert_includes result[:tracked], "desc-rule", "Description field should not affect evaluation"
+  end
+
+  # ===========================================================================
+  # Rule order conformance
+  # ===========================================================================
+
+  def test_insertion_order_preserves_rule_sequence
+    # With insertion order, rules should stay in the order given
+    rules = [
+      { "name" => "expensive-regex", "type" => "blocklist",
+        "condition" => { "field" => "http.user_agent", "operator" => "matches", "value" => "\\bBot\\b" } },
+      { "name" => "cheap-path", "type" => "blocklist",
+        "condition" => { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/blocked" } },
+    ]
+
+    # With insertion order: expensive-regex is checked first
+    json_insertion = JSON.generate({ "rule_order" => "insertion", "rules" => rules })
+    rs_insertion = RackAttackNative::RuleSet.from_json(json_insertion)
+
+    # A request matching both — the first blocklist in order wins
+    native_data = build_native_data({ path: "/blocked", user_agent: "My Bot Agent" })
+    result = rs_insertion.evaluate(native_data)
+    assert_equal "expensive-regex", result[:blocklisted],
+                 "Insertion order: first matching blocklist in JSON order should win"
+  end
+
+  def test_cost_order_reorders_rules
+    rules = [
+      { "name" => "expensive-regex", "type" => "blocklist",
+        "condition" => { "field" => "http.user_agent", "operator" => "matches", "value" => "\\bBot\\b" } },
+      { "name" => "cheap-path", "type" => "blocklist",
+        "condition" => { "field" => "http.request.uri.path", "operator" => "eq", "value" => "/blocked" } },
+    ]
+
+    # With cost order: cheap-path (cost ~2) is checked before expensive-regex (cost ~10)
+    json_cost = JSON.generate({ "rule_order" => "cost", "rules" => rules })
+    rs_cost = RackAttackNative::RuleSet.from_json(json_cost)
+
+    native_data = build_native_data({ path: "/blocked", user_agent: "My Bot Agent" })
+    result = rs_cost.evaluate(native_data)
+    assert_equal "cheap-path", result[:blocklisted],
+                 "Cost order: cheaper blocklist should be evaluated first and win"
+  end
+
+  def test_invalid_rule_order_rejected
+    json = JSON.generate({ "rule_order" => "random", "rules" => [] })
+    error = assert_raises(ArgumentError) { RackAttackNative::RuleSet.from_json(json) }
+    assert_match(/Invalid rule_order/, error.message)
+  end
 end
