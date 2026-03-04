@@ -4,6 +4,7 @@ module Rack
   class Attack
     class RulesetValidator
       VALID_TYPES = %w[safelist blocklist throttle track].freeze
+      NUMERIC_OPERATORS = %w[gt lt gte lte].freeze
 
       VALID_OPERATORS = %w[
         eq ne in not_in contains starts_with ends_with matches wildcard
@@ -55,8 +56,21 @@ module Rack
           return Result.new(valid?: false, errors: ["Ruleset must contain a \"rules\" array"])
         end
 
+        seen_names = {}
         rules.each_with_index do |rule, i|
           validate_rule(rule, i)
+
+          # Detect duplicate rule names
+          if rule.is_a?(Hash)
+            name = (rule["name"] || rule[:name]).to_s
+            unless name.empty?
+              if seen_names.key?(name)
+                @errors << "Rule \"#{name}\": duplicate rule name (first seen at rule ##{seen_names[name]})"
+              else
+                seen_names[name] = i
+              end
+            end
+          end
         end
 
         if data.key?("jwt_keys")
@@ -119,6 +133,15 @@ module Rack
           unless rule["period"].is_a?(Numeric) && rule["period"] > 0
             @errors << "#{prefix}: throttle requires a positive numeric \"period\""
           end
+
+          # Validate throttle key field names
+          if rule["key"].is_a?(Array)
+            rule["key"].each do |k|
+              unless valid_field?(k.to_s)
+                @errors << "#{prefix}: invalid key field \"#{k}\""
+              end
+            end
+          end
         end
 
         # Validate condition structure
@@ -180,6 +203,37 @@ module Rack
         if operator && !%w[exists not_exists].include?(operator)
           unless leaf.key?("value")
             @errors << "#{prefix}: condition with operator \"#{operator}\" requires a \"value\""
+          end
+        end
+
+        # Validate value types for specific operators
+        if leaf.key?("value") && operator.is_a?(String)
+          value = leaf["value"]
+
+          case operator
+          when "matches"
+            if value.is_a?(String)
+              begin
+                Regexp.new(value)
+              rescue RegexpError => e
+                @errors << "#{prefix}: invalid regex \"#{value}\": #{e.message}"
+              end
+            end
+          when "in_ip_range", "not_in_ip_range"
+            cidrs = value.is_a?(Array) ? value : [value]
+            cidrs.each do |cidr|
+              next unless cidr.is_a?(String)
+
+              begin
+                IPAddr.new(cidr)
+              rescue IPAddr::InvalidAddressError
+                @errors << "#{prefix}: invalid CIDR \"#{cidr}\""
+              end
+            end
+          when *NUMERIC_OPERATORS
+            unless value.is_a?(Numeric)
+              @errors << "#{prefix}: operator \"#{operator}\" requires a numeric value, got #{value.class}"
+            end
           end
         end
 
