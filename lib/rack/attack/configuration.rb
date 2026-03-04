@@ -203,6 +203,40 @@ module Rack
         end
       end
 
+      def simulate(**request_options)
+        request = build_simulation_request(**request_options)
+        safelisted_by = find_safelist_match(request)
+        blocked_by = find_blocklist_match(request)
+        throttle_matches = find_throttle_matches(request)
+        track_matches = find_track_matches(request)
+
+        SimulationResult.new(
+          safelisted_by: safelisted_by,
+          blocked_by: blocked_by,
+          throttle_matches: throttle_matches,
+          track_matches: track_matches
+        )
+      end
+
+      def validate_ruleset(source)
+        data = parse_source(source)
+        RulesetValidator.new(data).validate
+      end
+
+      def simulate_throttle(count:, **request_options)
+        request = build_simulation_request(**request_options)
+        matches = find_throttle_matches(request)
+        return SimulationResult.new if matches.empty?
+
+        # Find the most restrictive matching throttle
+        match = matches.min_by { |m| m[:limit] }
+        exceeded = count > match[:limit]
+
+        SimulationResult.new(
+          throttle_matches: exceeded ? matches : []
+        )
+      end
+
       def clear_configuration
         set_defaults
       end
@@ -294,6 +328,103 @@ module Rack
             ConditionEvaluator.extract_throttle_key(key_fields, request, jwt_config: jwt_config)
           end
         end
+      end
+
+      def build_simulation_request(**opts)
+        env = {
+          "REQUEST_METHOD" => (opts[:method] || "GET").to_s.upcase,
+          "PATH_INFO" => (opts[:path] || "/"),
+          "QUERY_STRING" => (opts[:query_string] || ""),
+          "REMOTE_ADDR" => (opts[:ip] || "127.0.0.1"),
+          "HTTP_HOST" => (opts[:host] || "example.com"),
+          "rack.input" => StringIO.new(opts[:body] || ""),
+          "SERVER_NAME" => (opts[:host] || "example.com"),
+          "SERVER_PORT" => "80"
+        }
+
+        env["HTTP_USER_AGENT"] = opts[:user_agent] if opts[:user_agent]
+        env["CONTENT_LENGTH"] = opts[:body].bytesize.to_s if opts[:body] && !opts[:body].empty?
+
+        if opts[:headers].is_a?(Hash)
+          opts[:headers].each do |name, value|
+            env_key = "HTTP_#{name.to_s.upcase.tr('-', '_')}"
+            env[env_key] = value.to_s
+          end
+        end
+
+        if opts[:cookies].is_a?(Hash)
+          env["HTTP_COOKIE"] = opts[:cookies].map { |k, v| "#{k}=#{v}" }.join("; ")
+        end
+
+        Request.new(env)
+      end
+
+      def find_safelist_match(request)
+        # Check named safelists
+        @safelists.each do |name, safelist|
+          return name if safelist.block.call(request)
+        end
+
+        # Check anonymous safelists
+        @anonymous_safelists.each do |safelist|
+          return safelist.name if safelist.block.call(request)
+        end
+
+        nil
+      end
+
+      def find_blocklist_match(request)
+        @blocklists.each do |name, blocklist|
+          return name if blocklist.block.call(request)
+        end
+
+        @anonymous_blocklists.each do |blocklist|
+          return blocklist.name if blocklist.block.call(request)
+        end
+
+        nil
+      end
+
+      def find_throttle_matches(request)
+        matches = []
+
+        @throttles.each do |name, throttle|
+          discriminator = throttle.block.call(request)
+          next unless discriminator
+
+          if Rack::Attack.throttle_discriminator_normalizer
+            discriminator = Rack::Attack.throttle_discriminator_normalizer.call(discriminator)
+          end
+
+          current_limit = throttle.limit.respond_to?(:call) ? throttle.limit.call(request) : throttle.limit
+          current_period = throttle.period.respond_to?(:call) ? throttle.period.call(request) : throttle.period
+
+          matches << {
+            name: name,
+            discriminator: discriminator,
+            limit: current_limit,
+            period: current_period
+          }
+        end
+
+        matches
+      end
+
+      def find_track_matches(request)
+        names = []
+
+        @tracks.each do |name, track_rule|
+          filter = track_rule.filter
+          if filter.is_a?(Throttle)
+            # For throttle-based tracks, check if discriminator is present
+            discriminator = filter.block.call(request)
+            names << name if discriminator
+          else
+            names << name if filter.block.call(request)
+          end
+        end
+
+        names
       end
 
       def rebuild_native_ruleset!
