@@ -193,12 +193,22 @@ impl Field {
                 let path = &data.path;
                 // Find the filename portion (after last '/')
                 let filename = path.rsplit('/').next().unwrap_or(path);
+                // Match Ruby File.extname semantics:
+                // - ".env" → "" (dotfile with no other dot has no extension)
+                // - ".env.bak" → "bak" (last dot is not the leading dot)
+                // - "file.env" → "env"
+                // - "file." → "" (trailing dot, empty extension)
                 if let Some(dot_pos) = filename.rfind('.') {
-                    let ext = &filename[dot_pos + 1..];
-                    if ext.is_empty() {
+                    // If the only dot is at position 0, it's a dotfile with no extension
+                    if dot_pos == 0 {
                         FieldValue::OptStr(None)
                     } else {
-                        FieldValue::Str(Cow::Borrowed(ext))
+                        let ext = &filename[dot_pos + 1..];
+                        if ext.is_empty() {
+                            FieldValue::OptStr(None)
+                        } else {
+                            FieldValue::Str(Cow::Borrowed(ext))
+                        }
                     }
                 } else {
                     FieldValue::OptStr(None)
@@ -581,19 +591,73 @@ mod tests {
         assert_eq!(ptr1, ptr2);
     }
 
-    // --- PathExtension dotfile ---
+    // --- PathExtension dotfile (matches Ruby File.extname) ---
 
     #[test]
-    fn test_dotfile_has_no_extension() {
-        // .env is a dotfile, not a file with extension "env" (per Ruby File.extname)
-        // In Rust, rsplit('.') on ".env" filename gives "env" after the dot
-        // This differs from Ruby where File.extname(".env") returns ""
-        // Note: Rust implementation treats the dot-separated part as extension
-        // regardless of whether it's a dotfile
-        let val = ".env";
-        let filename = val.rsplit('/').next().unwrap_or(val);
-        let ext = filename.rfind('.').map(|pos| &filename[pos + 1..]);
-        // The Rust impl will find "env" after the dot — this is by design
-        assert_eq!(ext, Some("env"));
+    fn test_dotfile_env_no_extension() {
+        // Ruby: File.extname(".env") => ""
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData { path: "/.env".to_string(), ..Default::default() };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        let val = Field::PathExtension.extract(&data, &ctx);
+        assert!(!val.exists(), "dotfile .env should have no extension");
+    }
+
+    #[test]
+    fn test_dotfile_gitignore_no_extension() {
+        // Ruby: File.extname(".gitignore") => ""
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData { path: "/.gitignore".to_string(), ..Default::default() };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        let val = Field::PathExtension.extract(&data, &ctx);
+        assert!(!val.exists(), "dotfile .gitignore should have no extension");
+    }
+
+    #[test]
+    fn test_dotfile_with_second_dot_has_extension() {
+        // Ruby: File.extname(".env.bak") => ".bak"
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData { path: "/.env.bak".to_string(), ..Default::default() };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        let val = Field::PathExtension.extract(&data, &ctx);
+        assert_eq!(val.as_str(), Some("bak"));
+    }
+
+    #[test]
+    fn test_regular_file_with_env_extension() {
+        // Ruby: File.extname("file.env") => ".env"
+        use crate::request_data::RequestData;
+        use crate::query::QueryData;
+        use crate::body::BodyData;
+        let data = RequestData { path: "/config/file.env".to_string(), ..Default::default() };
+        let ctx = RequestContext {
+            jwt: None,
+            query: QueryData::new(&data.query_string),
+            body: BodyData::new(None),
+            uri_cache: OnceCell::new(),
+        };
+        let val = Field::PathExtension.extract(&data, &ctx);
+        assert_eq!(val.as_str(), Some("env"));
     }
 }

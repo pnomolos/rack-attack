@@ -139,11 +139,18 @@ impl<'a> JwtData<'a> {
         // Case-insensitive "Bearer" prefix with flexible whitespace (matches Ruby regex /\ABearer\s+(.+)\z/i)
         let token = authorization.and_then(|auth| {
             let trimmed = auth.trim();
-            if trimmed.len() > 7
-                && trimmed[..7].eq_ignore_ascii_case("bearer ")
+            // Match Ruby regex /\ABearer\s+(.+)\z/i: case-insensitive "bearer"
+            // followed by one or more ASCII whitespace characters (space, tab, etc.)
+            if trimmed.len() > 6
+                && trimmed[..6].eq_ignore_ascii_case("bearer")
             {
-                // Skip "bearer" and trim any leading whitespace from the token
                 let after_bearer = &trimmed[6..];
+                // Require at least one whitespace char after "bearer"
+                if after_bearer.is_empty()
+                    || !after_bearer.as_bytes()[0].is_ascii_whitespace()
+                {
+                    return None;
+                }
                 let token = after_bearer.trim_start();
                 if token.is_empty() {
                     None
@@ -589,6 +596,29 @@ mod tests {
         assert_eq!(jwt_data.verified_payload_claim("sub"), None);
         // Unverified still works via base64 decode (verified cache has None payload)
         assert_eq!(jwt_data.payload_claim("sub"), Some("user_99".to_string()));
+    }
+
+    #[test]
+    fn test_bearer_tab_separator() {
+        // Ruby regex /\ABearer\s+(.+)\z/i matches tab as whitespace
+        let payload = serde_json::json!({"sub": "user_123", "exp": FUTURE_EXP});
+        let token = make_hs256_token(&payload);
+        let auth = format!("Bearer\t{}", token); // tab instead of space
+        let jwt_data = JwtData::new(Some(&auth), None);
+        assert_eq!(jwt_data.payload_claim("sub"), Some("user_123".to_string()));
+    }
+
+    #[test]
+    fn test_bearer_newline_separator() {
+        // \s also matches newlines in Ruby
+        let payload = serde_json::json!({"sub": "user_123", "exp": FUTURE_EXP});
+        let token = make_hs256_token(&payload);
+        let auth = format!("Bearer\n{}", token);
+        // Note: trim() at the start removes outer whitespace, but newline between
+        // bearer and token is inside the string. After trim, "Bearer\n<token>"
+        // still has the newline. The check should pass since \n is ASCII whitespace.
+        let jwt_data = JwtData::new(Some(&auth), None);
+        assert_eq!(jwt_data.payload_claim("sub"), Some("user_123".to_string()));
     }
 
     #[test]

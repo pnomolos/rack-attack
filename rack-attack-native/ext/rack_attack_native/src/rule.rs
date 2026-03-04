@@ -423,9 +423,27 @@ fn eval_leaf(
         apply_transforms(raw_val, transforms)
     };
 
-    // For numeric fields with numeric operators
+    // For numeric fields: try numeric comparison first, then fall back to
+    // string comparison by stringifying the number (matches Ruby behavior where
+    // content_length is a string and "0" == "0" works).
     if let FieldValue::Number(n) = &field_val {
-        return eval_numeric(*n, operator, compiled);
+        if matches!(compiled, CompiledValue::Number(_)) {
+            return eval_numeric(*n, operator, compiled);
+        }
+        // Stringify the number and fall through to string comparison
+        // so that eq/ne/in/not_in with string values work correctly.
+        let stringified = n.to_string();
+        return match (operator, compiled) {
+            (Operator::Eq, CompiledValue::Str(v)) => stringified == *v,
+            (Operator::Ne, CompiledValue::Str(v)) => stringified != *v,
+            (Operator::Contains, CompiledValue::Str(v)) => stringified.contains(v.as_str()),
+            (Operator::StartsWith, CompiledValue::Str(v)) => stringified.starts_with(v.as_str()),
+            (Operator::EndsWith, CompiledValue::Str(v)) => stringified.ends_with(v.as_str()),
+            (Operator::Matches, CompiledValue::Regex(re)) => re.is_match(&stringified),
+            (Operator::In, CompiledValue::StringSet(set)) => set.contains(&stringified),
+            (Operator::NotIn, CompiledValue::StringSet(set)) => !set.contains(&stringified),
+            _ => false,
+        };
     }
 
     let s = match field_val.as_str() {
@@ -1187,6 +1205,79 @@ mod tests {
             &ctx,
         );
         assert_eq!(key, None);
+    }
+
+    // --- Number-to-string comparison tests ---
+
+    #[test]
+    fn test_content_length_eq_string_zero() {
+        // Ruby returns content_length as string; "0" == "0" should be true
+        let data = test_request(); // content_length = 0
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::ContentLength,
+            operator: Operator::Eq,
+            compiled: CompiledValue::Str("0".to_string()),
+            transforms: vec![],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_content_length_ne_string() {
+        let data = test_request(); // content_length = 0
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::ContentLength,
+            operator: Operator::Ne,
+            compiled: CompiledValue::Str("100".to_string()),
+            transforms: vec![],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_content_length_in_string_set() {
+        let mut data = test_request();
+        data.content_length = 42;
+        let ctx = test_ctx(&data);
+        let mut set = HashSet::new();
+        set.insert("42".to_string());
+        set.insert("100".to_string());
+        let cond = Condition::Leaf {
+            field: Field::ContentLength,
+            operator: Operator::In,
+            compiled: CompiledValue::StringSet(set),
+            transforms: vec![],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_length_transform_eq_string_value() {
+        // length transform produces Number; comparing against string "13" should work
+        let data = test_request(); // path = "/api/v2/users" (13 chars)
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Eq,
+            compiled: CompiledValue::Str("13".to_string()),
+            transforms: vec![Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
+    }
+
+    #[test]
+    fn test_length_transform_ne_string_value() {
+        let data = test_request(); // path = "/api/v2/users" (13 chars)
+        let ctx = test_ctx(&data);
+        let cond = Condition::Leaf {
+            field: Field::Path,
+            operator: Operator::Ne,
+            compiled: CompiledValue::Str("5".to_string()),
+            transforms: vec![Transform::Length],
+        };
+        assert!(cond.matches(&data, &ctx));
     }
 
     // --- Length transform fast-path tests ---
