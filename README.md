@@ -32,6 +32,7 @@ See the [Backing & Hacking blog post](https://www.kickstarter.com/backing-and-ha
   - [Throttling](#throttling)
     - [`throttle(name, options, &block)`](#throttlename-options-block)
   - [Tracks](#tracks)
+  - [JSON Rules](#json-rules)
   - [Cache store configuration](#cache-store-configuration)
 - [Customizing responses](#customizing-responses)
   - [RateLimit headers for well-behaved clients](#ratelimit-headers-for-well-behaved-clients)
@@ -298,6 +299,30 @@ ActiveSupport::Notifications.subscribe("track.rack_attack") do |name, start, fin
   end
 end
 ```
+
+### JSON Rules
+
+As an alternative to the Ruby block DSL, rules can be defined in a declarative JSON format and loaded with `load_ruleset`. JSON rules work alongside block-based rules, support the same safelisting/blocklisting/throttling/tracking semantics, and can be optionally accelerated via a native Rust engine.
+
+```ruby
+# Load from a file
+Rack::Attack.load_ruleset(Rails.root.join("config/rack_attack_rules.json").to_s)
+
+# Or from a Ruby Hash
+Rack::Attack.load_ruleset({
+  rules: [
+    { name: "block-bad-ips", type: "blocklist",
+      condition: { field: "ip.src", operator: "in", value: ["203.0.113.50", "198.51.100.99"] } },
+    { name: "throttle-api", type: "throttle", limit: 100, period: 60,
+      key: ["ip.src"],
+      condition: { field: "http.request.uri.path", operator: "starts_with", value: "/api/" } }
+  ]
+})
+```
+
+The JSON format supports 18 operators (`eq`, `in`, `matches`, `in_ip_range`, `wildcard`, etc.), field extraction from headers/cookies/query params/JWT claims, transforms (`lower`, `url_decode`, etc.), and logical combinators (`and`, `or`, `not`).
+
+For the complete format reference, see the **[JSON Rule Format documentation](docs/json_rule_format.md)**.
 
 ### Cache store configuration
 
