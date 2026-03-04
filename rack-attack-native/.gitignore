@@ -1,0 +1,9 @@
+target/
+tmp/
+lib/rack_attack_native/rack_attack_native.bundle
+lib/rack_attack_native/rack_attack_native.so
+*.o
+*.so
+*.bundle
+pkg/
+Gemfile.lock

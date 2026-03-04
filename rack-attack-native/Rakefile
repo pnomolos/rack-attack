@@ -1,0 +1,16 @@
+# frozen_string_literal: true
+
+require "rake/extensiontask"
+require "rake/testtask"
+
+Rake::ExtensionTask.new("rack_attack_native") do |ext|
+  ext.lib_dir = "lib/rack_attack_native"
+  ext.source_pattern = "*.{rs,toml}"
+end
+
+Rake::TestTask.new(:spec) do |t|
+  t.libs << "spec"
+  t.test_files = FileList["spec/**/*_spec.rb"]
+end
+
+task default: [:compile, :spec]
