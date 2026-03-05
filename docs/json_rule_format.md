@@ -210,7 +210,7 @@ Every rule is a JSON object with at least `name`, `type`, and `condition` fields
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique identifier for the rule. Used in logging and `rack.attack.matched`. |
 | `type` | string | yes | One of `"safelist"`, `"blocklist"`, `"throttle"`, or `"track"`. |
-| `condition` | object or null | yes | The condition tree to evaluate (see [Conditions](#conditions)). `null` means "always match". |
+| `condition` | object or null | yes (unless `enabled: false`) | The condition tree to evaluate (see [Conditions](#conditions)). `null` means "always match". |
 | `limit` | integer | throttle only | Maximum number of requests allowed in the period. |
 | `period` | integer | throttle only | Time window in seconds. |
 | `key` | array of strings | throttle only | Field names used to build the throttle discriminator (see [Fields](#fields)). Defaults to `["ip.src"]`. |
@@ -499,8 +499,8 @@ Operators are inspired by [Cloudflare's rule operators](https://developers.cloud
 
 | Operator | Description | Value Type | Example |
 |----------|-------------|------------|---------|
-| `eq` | Exact equality | string | `"value": "/api"` |
-| `ne` | Not equal | string | `"value": "/api"` |
+| `eq` | Exact equality | string or number | `"value": "/api"` |
+| `ne` | Not equal | string or number | `"value": "/api"` |
 | `contains` | Substring match | string | `"value": "admin"` |
 | `starts_with` | Prefix match | string | `"value": "/api/"` |
 | `ends_with` | Suffix match | string | `"value": ".json"` |
