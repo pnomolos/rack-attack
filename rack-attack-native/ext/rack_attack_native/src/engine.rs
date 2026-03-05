@@ -63,7 +63,7 @@ fn collect_field_category(field: &Field, categories: &mut HashSet<FieldCategory>
         Field::Header(_) => { categories.insert(FieldCategory::Headers); }
         Field::Cookie(_) => { categories.insert(FieldCategory::Cookies); }
         Field::Uri | Field::QueryParam(_) => { categories.insert(FieldCategory::QueryString); }
-        Field::BodyRaw | Field::BodyJsonField(_) => { categories.insert(FieldCategory::Body); }
+        Field::BodyRaw | Field::BodyJson(_) => { categories.insert(FieldCategory::Body); }
         Field::JwtPayload(_) | Field::JwtHeader(_) | Field::JwtVerifiedPayload(_) | Field::JwtValid => {
             categories.insert(FieldCategory::Authorization);
         }
@@ -95,7 +95,7 @@ fn estimate_field_cost(field: &Field) -> u32 {
         Field::Header(_) | Field::Cookie(_) => 4,
         Field::QueryParam(_) => 5,
         Field::BodyRaw => 8,
-        Field::BodyJsonField(_) => 10,
+        Field::BodyJson(_) => 10,
         Field::JwtPayload(_) | Field::JwtHeader(_) => 15,
         Field::JwtValid => 20,
         Field::JwtVerifiedPayload(_) => 50,

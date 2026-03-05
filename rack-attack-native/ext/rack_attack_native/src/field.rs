@@ -48,7 +48,7 @@ pub enum Field {
     /// Raw request body
     BodyRaw,
     /// JSON body field: `http.request.body.json["key"]` or nested `http.request.body.json["a.b.c"]`
-    BodyJsonField(Vec<String>),
+    BodyJson(Vec<String>),
     /// Unverified JWT payload claim: `jwt.payload["claim"]`
     JwtPayload(String),
     /// Unverified JWT header field: `jwt.header["field"]`
@@ -126,7 +126,7 @@ impl Field {
                 if let Some(rest) = s.strip_prefix("http.request.body.json[\"") {
                     if let Some(name) = rest.strip_suffix("\"]") {
                         let keys: Vec<String> = name.split('.').map(|s| s.to_string()).collect();
-                        return Ok(Field::BodyJsonField(keys));
+                        return Ok(Field::BodyJson(keys));
                     }
                 }
                 if let Some(rest) = s.strip_prefix("jwt.payload[\"") {
@@ -227,7 +227,7 @@ impl Field {
             }
 
             // JSON body field — supports nested access via dot-separated keys
-            Field::BodyJsonField(keys) => {
+            Field::BodyJson(keys) => {
                 if let Some(s) = ctx.body.json_nested_field_str(keys) {
                     FieldValue::OptStr(Some(Cow::Borrowed(s)))
                 } else {
@@ -419,16 +419,16 @@ mod tests {
     #[test]
     fn test_parse_body_json_field() {
         match Field::parse("http.request.body.json[\"user_id\"]").unwrap() {
-            Field::BodyJsonField(keys) => assert_eq!(keys, vec!["user_id"]),
-            other => panic!("Expected BodyJsonField, got {:?}", other),
+            Field::BodyJson(keys) => assert_eq!(keys, vec!["user_id"]),
+            other => panic!("Expected BodyJson, got {:?}", other),
         }
     }
 
     #[test]
     fn test_parse_body_json_nested_field() {
         match Field::parse("http.request.body.json[\"user.profile.name\"]").unwrap() {
-            Field::BodyJsonField(keys) => assert_eq!(keys, vec!["user", "profile", "name"]),
-            other => panic!("Expected BodyJsonField, got {:?}", other),
+            Field::BodyJson(keys) => assert_eq!(keys, vec!["user", "profile", "name"]),
+            other => panic!("Expected BodyJson, got {:?}", other),
         }
     }
 

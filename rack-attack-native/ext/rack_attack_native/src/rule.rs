@@ -244,7 +244,7 @@ fn compile_value(
             // eq/ne support both string and numeric values
             if let Some(n) = value.as_ref().and_then(|v| v.as_f64()) {
                 // Only treat as numeric if the JSON value is actually a number (not a string)
-                if value.as_ref().map_or(false, |v| v.is_number()) {
+                if value.as_ref().is_some_and(|v| v.is_number()) {
                     return Ok(CompiledValue::Number(n));
                 }
             }
@@ -327,13 +327,11 @@ pub fn compile_rule(raw: &RawRule) -> Result<Rule, String> {
         None => Vec::new(),
     };
 
-    if rule_type == RuleType::Throttle {
-        if raw.limit.is_none() || raw.period.is_none() {
-            return Err(format!(
-                "Throttle rule '{}' requires limit and period",
-                raw.name
-            ));
-        }
+    if rule_type == RuleType::Throttle && (raw.limit.is_none() || raw.period.is_none()) {
+        return Err(format!(
+            "Throttle rule '{}' requires limit and period",
+            raw.name
+        ));
     }
 
     // Default throttle key to ip.src when not specified (matches Ruby behavior)
@@ -481,17 +479,17 @@ fn eval_leaf(
             // Case-sensitive matching (matches Ruby File.fnmatch with FNM_PATHNAME)
             glob_match::glob_match(pattern, s)
         }
-        (Operator::Gt, CompiledValue::Number(n)) => s.parse::<f64>().map_or(false, |v| v > *n),
-        (Operator::Lt, CompiledValue::Number(n)) => s.parse::<f64>().map_or(false, |v| v < *n),
-        (Operator::Gte, CompiledValue::Number(n)) => s.parse::<f64>().map_or(false, |v| v >= *n),
+        (Operator::Gt, CompiledValue::Number(n)) => s.parse::<f64>().is_ok_and(|v| v > *n),
+        (Operator::Lt, CompiledValue::Number(n)) => s.parse::<f64>().is_ok_and(|v| v < *n),
+        (Operator::Gte, CompiledValue::Number(n)) => s.parse::<f64>().is_ok_and(|v| v >= *n),
         (Operator::Eq, CompiledValue::Number(n)) => {
-            s.parse::<f64>().map_or(false, |v| (v - *n).abs() < f64::EPSILON)
+            s.parse::<f64>().is_ok_and(|v| (v - *n).abs() < f64::EPSILON)
         }
         (Operator::Ne, CompiledValue::Number(n)) => {
-            s.parse::<f64>().map_or(false, |v| (v - *n).abs() >= f64::EPSILON)
+            s.parse::<f64>().is_ok_and(|v| (v - *n).abs() >= f64::EPSILON)
         }
         (Operator::Lte, CompiledValue::Number(n)) => {
-            s.parse::<f64>().map_or(false, |v| v <= *n)
+            s.parse::<f64>().is_ok_and(|v| v <= *n)
         }
         _ => false,
     }
@@ -850,7 +848,7 @@ mod tests {
         let mut data = test_request();
         data.body = Some(r#"{"user_id": "123", "name": "Alice"}"#.to_string());
         let ctx = test_ctx(&data);
-        let val = Field::BodyJsonField(vec!["user_id".to_string()]).extract(&data, &ctx);
+        let val = Field::BodyJson(vec!["user_id".to_string()]).extract(&data, &ctx);
         assert_eq!(val.as_str(), Some("123"));
     }
 
@@ -859,7 +857,7 @@ mod tests {
         let mut data = test_request();
         data.body = Some(r#"{"a": "b"}"#.to_string());
         let ctx = test_ctx(&data);
-        let val = Field::BodyJsonField(vec!["missing".to_string()]).extract(&data, &ctx);
+        let val = Field::BodyJson(vec!["missing".to_string()]).extract(&data, &ctx);
         assert!(!val.exists());
     }
 
