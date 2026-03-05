@@ -1,10 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/rack/rack-attack/blob/main/docs/json_rule_schema.json",
+  "$id": "https://raw.githubusercontent.com/rack/rack-attack/main/docs/json_rule_schema.json",
   "title": "Rack::Attack JSON Ruleset",
   "description": "Schema for Rack::Attack declarative JSON rule format. See docs/json_rule_format.md for full documentation.",
   "type": "object",
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI for editor support. Ignored by the evaluator."
+    },
     "rules": {
       "type": "array",
       "description": "Array of rule objects to evaluate against incoming requests.",
@@ -101,7 +105,8 @@
         },
         {
           "if": {
-            "properties": { "enabled": { "const": false } }
+            "properties": { "enabled": { "const": false } },
+            "required": ["enabled"]
           },
           "then": true,
           "else": {
@@ -154,7 +159,8 @@
       "allOf": [
         {
           "if": {
-            "properties": { "operator": { "enum": ["exists", "not_exists"] } }
+            "properties": { "operator": { "enum": ["exists", "not_exists"] } },
+            "required": ["operator"]
           },
           "then": {
             "not": { "required": ["value"] }
@@ -162,7 +168,8 @@
         },
         {
           "if": {
-            "properties": { "operator": { "enum": ["in", "not_in", "in_ip_range", "not_in_ip_range"] } }
+            "properties": { "operator": { "enum": ["in", "not_in"] } },
+            "required": ["operator"]
           },
           "then": {
             "properties": {
@@ -177,7 +184,29 @@
         },
         {
           "if": {
-            "properties": { "operator": { "enum": ["gt", "lt", "gte", "lte"] } }
+            "properties": { "operator": { "enum": ["in_ip_range", "not_in_ip_range"] } },
+            "required": ["operator"]
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1
+                  }
+                ]
+              }
+            },
+            "required": ["value"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["gt", "lt", "gte", "lte"] } },
+            "required": ["operator"]
           },
           "then": {
             "properties": {
@@ -188,7 +217,8 @@
         },
         {
           "if": {
-            "properties": { "operator": { "enum": ["eq", "ne", "contains", "starts_with", "ends_with", "matches", "wildcard"] } }
+            "properties": { "operator": { "enum": ["eq", "ne", "contains", "starts_with", "ends_with", "matches", "wildcard"] } },
+            "required": ["operator"]
           },
           "then": {
             "properties": {
