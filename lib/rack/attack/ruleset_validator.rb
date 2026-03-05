@@ -38,23 +38,24 @@ module Rack
         /\Ajwt\.verified_payload\["[^"]+"\]\z/
       ].freeze
 
-      Result = Struct.new(:valid?, :errors, keyword_init: true)
+      Result = Struct.new(:valid?, :errors, :warnings, keyword_init: true)
 
       def initialize(data)
         @data = data
         @errors = []
+        @warnings = []
       end
 
       def validate
         data = normalize(@data)
 
         unless data.is_a?(Hash)
-          return Result.new(valid?: false, errors: ["Ruleset must be a Hash"])
+          return Result.new(valid?: false, errors: ["Ruleset must be a Hash"], warnings: [])
         end
 
         rules = data["rules"]
         unless rules.is_a?(Array)
-          return Result.new(valid?: false, errors: ["Ruleset must contain a \"rules\" array"])
+          return Result.new(valid?: false, errors: ["Ruleset must contain a \"rules\" array"], warnings: [])
         end
 
         if data.key?("rule_order")
@@ -72,9 +73,9 @@ module Rack
             name = (rule["name"] || rule[:name]).to_s
             unless name.empty?
               if seen_names.key?(name)
-                @errors << "Rule \"#{name}\": duplicate rule name (first seen at rule ##{seen_names[name]})"
+                @warnings << "Rule \"#{name}\": duplicate rule name (first seen at rule ##{seen_names[name]})"
               else
-                seen_names[name] = i
+                seen_names[name] = index
               end
             end
           end
@@ -84,7 +85,7 @@ module Rack
           validate_jwt_keys(data["jwt_keys"])
         end
 
-        Result.new(valid?: @errors.empty?, errors: @errors)
+        Result.new(valid?: @errors.empty?, errors: @errors, warnings: @warnings)
       end
 
       private
@@ -159,6 +160,10 @@ module Rack
 
           unless period.is_a?(Numeric) && period > 0
             @errors << "#{prefix}: throttle requires a positive numeric \"period\""
+          end
+
+          if limit.is_a?(Numeric) && limit > 100_000
+            @warnings << "#{prefix}: throttle limit #{limit} is unusually high — verify this is intentional"
           end
 
           # Validate throttle key field names

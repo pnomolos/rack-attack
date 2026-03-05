@@ -26,6 +26,15 @@ module Rack
           else
             store
           end
+
+        if @store
+          required_methods = %i[read write increment delete]
+          missing = required_methods.reject { |m| @store.respond_to?(m) }
+          unless missing.empty?
+            raise ArgumentError,
+              "Rack::Attack cache store #{@store.class.name} is missing required method(s): #{missing.map { |m| "##{m}" }.join(", ")}"
+          end
+        end
       end
 
       def count(unprefixed_key, period)

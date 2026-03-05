@@ -13,6 +13,9 @@ module Rack
         MANDATORY_OPTIONS.each do |opt|
           raise ArgumentError, "Must pass #{opt.inspect} option" unless options[opt]
         end
+        # Note: limit and period may be callables (procs/lambdas) that are evaluated
+        # per-request. We cannot validate their return types at config time — they are
+        # assumed to return Numeric values when called.
         @limit = options[:limit]
         @period = options[:period].respond_to?(:call) ? options[:period] : options[:period].to_i
         @type   = options.fetch(:type, :throttle)
@@ -46,6 +49,9 @@ module Rack
             Rack::Attack.instrument(request)
           end
         end
+      rescue StandardError => e
+        warn "[Rack::Attack] Throttle \"#{name}\" raised #{e.class}: #{e.message} — failing open (not matched)"
+        false
       end
 
       private

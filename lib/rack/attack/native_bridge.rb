@@ -35,8 +35,6 @@ module Rack
 
           begin
             rule_set = RackAttackNative::RuleSet.from_json(JSON.generate(json_data))
-            # Cache which field categories the ruleset actually needs
-            @required_fields = rule_set.required_fields.to_set
             rule_set
           rescue StandardError => error
             warn "[Rack::Attack] Failed to compile native ruleset: #{error.message}"
@@ -44,7 +42,7 @@ module Rack
           end
         end
 
-        def request_to_native(request, required_fields = @required_fields)
+        def request_to_native(request, required_fields = nil)
           if required_fields.nil?
             # Fallback: send everything (backward compat)
             return build_request_data(request, all_fields: true)

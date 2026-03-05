@@ -335,7 +335,8 @@ module Rack
             payload_b64 += "=" * ((4 - payload_b64.length % 4) % 4)
             payload_json = Base64.urlsafe_decode64(payload_b64)
             JSON.parse(payload_json)
-          rescue StandardError
+          rescue StandardError => e
+            warn "[Rack::Attack] JWT payload decode failed: #{e.message}"
             nil
           end
         end
@@ -354,7 +355,8 @@ module Rack
             header_b64 += "=" * ((4 - header_b64.length % 4) % 4)
             header_json = Base64.urlsafe_decode64(header_b64)
             JSON.parse(header_json)
-          rescue StandardError
+          rescue StandardError => e
+            warn "[Rack::Attack] JWT header decode failed: #{e.message}"
             nil
           end
         end

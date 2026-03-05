@@ -19,6 +19,9 @@ module Rack
             Rack::Attack.instrument(request)
           end
         end
+      rescue StandardError => e
+        warn "[Rack::Attack] Check \"#{name}\" block raised #{e.class}: #{e.message} — failing open (not matched)"
+        false
       end
     end
   end

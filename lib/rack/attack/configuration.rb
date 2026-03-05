@@ -7,6 +7,8 @@ require "set"
 module Rack
   class Attack
     class Configuration
+      CONFIGURATION_MUTEX = Mutex.new
+
       DEFAULT_BLOCKLISTED_RESPONDER = lambda { |_req| [403, { 'content-type' => 'text/plain' }, ["Forbidden\n"]] }
 
       DEFAULT_THROTTLED_RESPONDER = lambda do |req|
@@ -83,30 +85,32 @@ module Rack
       end
 
       def load_ruleset(source, replace: false, jwt_keys: nil, validate: false)
-        clear_configuration if replace
+        CONFIGURATION_MUTEX.synchronize do
+          clear_configuration if replace
 
-        data = parse_source(source)
+          data = parse_source(source)
 
-        if validate
-          result = RulesetValidator.new(data).validate
-          unless result.valid?
-            raise ArgumentError, "Invalid ruleset: #{result.errors.join('; ')}"
+          if validate
+            result = RulesetValidator.new(data).validate
+            unless result.valid?
+              raise ArgumentError, "Invalid ruleset: #{result.errors.join('; ')}"
+            end
           end
+
+          rules = data["rules"] || []
+          jwt_config = jwt_keys || data["jwt_keys"]
+          # Only update global settings if explicitly provided in this call
+          @jwt_keys = jwt_config if jwt_config
+          @rule_order = data["rule_order"] if data.key?("rule_order")
+          # Use current @jwt_keys as fallback for rule registration
+          effective_jwt_config = jwt_config || @jwt_keys
+
+          rules.each do |rule|
+            register_json_rule(rule, jwt_config: effective_jwt_config)
+          end
+
+          rebuild_native_ruleset!
         end
-
-        rules = data["rules"] || []
-        jwt_config = jwt_keys || data["jwt_keys"]
-        # Only update global settings if explicitly provided in this call
-        @jwt_keys = jwt_config if jwt_config
-        @rule_order = data["rule_order"] if data.key?("rule_order")
-        # Use current @jwt_keys as fallback for rule registration
-        effective_jwt_config = jwt_config || @jwt_keys
-
-        rules.each do |rule|
-          register_json_rule(rule, jwt_config: effective_jwt_config)
-        end
-
-        rebuild_native_ruleset!
       end
 
       def safelisted?(request)
@@ -235,6 +239,11 @@ module Rack
         RulesetValidator.new(data).validate
       end
 
+      # NOTE: simulate_throttle only simulates the throttle path. It does NOT
+      # check safelists or blocklists — use #simulate for a full simulation that
+      # includes all rule types. This is by design: simulate_throttle answers
+      # "would this request be throttled at count N?" without the overhead of
+      # evaluating unrelated rule types.
       def simulate_throttle(count:, **request_options)
         request = build_simulation_request(**request_options)
         matches = find_throttle_matches(request)
@@ -250,7 +259,13 @@ module Rack
       end
 
       def clear_configuration
-        set_defaults
+        if CONFIGURATION_MUTEX.owned?
+          set_defaults
+        else
+          CONFIGURATION_MUTEX.synchronize do
+            set_defaults
+          end
+        end
       end
 
       private
@@ -276,6 +291,7 @@ module Rack
         @json_rule_names = Set.new
         @jwt_keys = nil
         @rule_order = nil
+        @required_fields = nil
         @native_ruleset = nil
       end
 
@@ -311,6 +327,11 @@ module Rack
         name = json_rule["name"]
         type = json_rule["type"]
         condition = json_rule["condition"]
+
+        if @json_rule_names.include?(name)
+          warn "[Rack::Attack] Duplicate rule name \"#{name}\" — overriding previous definition"
+          @json_rules.reject! { |r| r["name"] == name }
+        end
 
         @json_rules << json_rule
         @json_rule_names << name
@@ -444,25 +465,37 @@ module Rack
       end
 
       def rebuild_native_ruleset!
-        @native_ruleset = if @json_rules.any?
-                            NativeBridge.compile_ruleset(@json_rules, jwt_keys: @jwt_keys, rule_order: @rule_order)
-                          end
+        if @json_rules.any?
+          ruleset = NativeBridge.compile_ruleset(@json_rules, jwt_keys: @jwt_keys, rule_order: @rule_order)
+          if ruleset
+            @required_fields = ruleset.required_fields.to_set
+            @native_ruleset = ruleset
+          else
+            @native_ruleset = nil
+            @required_fields = nil
+          end
+        else
+          @native_ruleset = nil
+          @required_fields = nil
+        end
       end
 
       def evaluate_native(request)
-        return nil unless @native_ruleset
+        # Read-copy: grab a local reference so concurrent rebuilds don't affect us
+        ruleset = @native_ruleset
+        return nil unless ruleset
 
         cache_key = "rack.attack.native_result"
         return request.env[cache_key] if request.env.key?(cache_key)
 
-        native_request = NativeBridge.request_to_native(request)
-        result = @native_ruleset.evaluate(native_request)
+        native_request = NativeBridge.request_to_native(request, @required_fields)
+        result = ruleset.evaluate(native_request)
         # serde_magnus returns symbol keys; normalize to string keys
         result = stringify_native_result(result)
         request.env[cache_key] = result
         result
       rescue StandardError => error
-        warn "[Rack::Attack] Native evaluation failed: #{error.message}"
+        warn "[Rack::Attack] Native evaluation failed: #{error.message} — check your ruleset configuration and jwt_keys"
         request.env[cache_key] = nil
         nil
       end
