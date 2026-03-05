@@ -28,7 +28,7 @@ module Rack
 
         def extract_throttle_key(key_fields, request, jwt_config: nil)
           ctx = EvalContext.new(request, jwt_config)
-          parts = key_fields.map { |f| ctx.extract_field(f) }
+          parts = key_fields.map { |field| ctx.extract_field(field) }
           return nil if parts.any?(&:nil?)
 
           parts.join(":")
@@ -69,9 +69,9 @@ module Rack
           condition = symbolize_condition(condition)
 
           if condition.key?(:and)
-            condition[:and].all? { |c| evaluate(c) }
+            condition[:and].all? { |sub_cond| evaluate(sub_cond) }
           elsif condition.key?(:or)
-            condition[:or].any? { |c| evaluate(c) }
+            condition[:or].any? { |sub_cond| evaluate(sub_cond) }
           elsif condition.key?(:not)
             !evaluate(condition[:not])
           elsif condition.key?(:field)
@@ -85,6 +85,19 @@ module Rack
           case name
           when "ip.src"
             @request.ip
+          when /\Ahttp\./
+            extract_http_field(name)
+          when /\Ajwt\./
+            extract_jwt_field(name)
+          else
+            nil
+          end
+        end
+
+        private
+
+        def extract_http_field(name)
+          case name
           when "http.request.uri.path"
             @request.path
           when "http.request.method"
@@ -96,9 +109,9 @@ module Rack
           when "http.request.uri.query"
             @request.query_string
           when "http.request.uri"
-            qs = @request.query_string
-            if qs && !qs.empty?
-              "#{@request.path}?#{qs}"
+            query = @request.query_string
+            if query && !query.empty?
+              "#{@request.path}?#{query}"
             else
               @request.path
             end
@@ -112,7 +125,6 @@ module Rack
             return nil unless body
 
             body.rewind
-            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
             content = body.read(MAX_BODY_SIZE)
             body.rewind
             content
@@ -130,30 +142,31 @@ module Rack
             json_key = Regexp.last_match(1)
             keys = json_key.split(".")
             parse_body_json&.dig(*keys)&.to_s
+          end
+        end
+
+        def extract_jwt_field(name)
+          case name
           when /\Ajwt\.payload\["([^"]+)"\]\z/
             claim = Regexp.last_match(1)
             decode_jwt_payload&.dig(claim)&.to_s
           when /\Ajwt\.header\["([^"]+)"\]\z/
-            field = Regexp.last_match(1)
-            decode_jwt_header&.dig(field)&.to_s
+            header_field = Regexp.last_match(1)
+            decode_jwt_header&.dig(header_field)&.to_s
           when /\Ajwt\.verified_payload\["([^"]+)"\]\z/
             claim = Regexp.last_match(1)
             verify_jwt_payload&.dig(claim)&.to_s
           when "jwt.valid"
             verify_jwt_valid ? "true" : nil
-          else
-            nil
           end
         end
-
-        private
 
         def symbolize_condition(cond)
           return cond if cond.is_a?(Hash) && cond.keys.first.is_a?(Symbol)
 
           if cond.is_a?(Hash)
-            cond.each_with_object({}) do |(k, v), h|
-              h[k.to_sym] = v
+            cond.each_with_object({}) do |(key, value), hash|
+              hash[key.to_sym] = value
             end
           else
             cond
@@ -186,8 +199,8 @@ module Rack
         def apply_transforms(value, transforms)
           transforms = [transforms] unless transforms.is_a?(Array)
 
-          transforms.each do |t|
-            value = case t
+          transforms.each do |transform|
+            value = case transform
                     when "lower"
                       value.downcase
                     when "upper"
@@ -208,20 +221,20 @@ module Rack
           case op
           when "eq"
             if comparison_val.is_a?(Numeric)
-              numeric_compare(field_val) { |n| n == comparison_val }
+              numeric_compare(field_val) { |num| num == comparison_val }
             else
               field_val == comparison_val.to_s
             end
           when "ne"
             if comparison_val.is_a?(Numeric)
-              numeric_compare(field_val) { |n| n != comparison_val }
+              numeric_compare(field_val) { |num| num != comparison_val }
             else
               field_val != comparison_val.to_s
             end
           when "in"
-            Array(comparison_val).any? { |v| field_val == v.to_s }
+            Array(comparison_val).any? { |item| field_val == item.to_s }
           when "not_in"
-            Array(comparison_val).none? { |v| field_val == v.to_s }
+            Array(comparison_val).none? { |item| field_val == item.to_s }
           when "contains"
             field_val.include?(comparison_val.to_s)
           when "starts_with"
@@ -237,13 +250,13 @@ module Rack
           when "wildcard"
             File.fnmatch(comparison_val.to_s, field_val, File::FNM_PATHNAME)
           when "gt"
-            numeric_compare(field_val) { |n| n > comparison_val }
+            numeric_compare(field_val) { |num| num > comparison_val }
           when "lt"
-            numeric_compare(field_val) { |n| n < comparison_val }
+            numeric_compare(field_val) { |num| num < comparison_val }
           when "gte"
-            numeric_compare(field_val) { |n| n >= comparison_val }
+            numeric_compare(field_val) { |num| num >= comparison_val }
           when "lte"
-            numeric_compare(field_val) { |n| n <= comparison_val }
+            numeric_compare(field_val) { |num| num <= comparison_val }
           when "in_ip_range"
             ip_in_ranges?(field_val, Array(comparison_val))
           when "not_in_ip_range"

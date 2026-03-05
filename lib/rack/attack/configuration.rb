@@ -124,7 +124,7 @@ module Rack
 
           # Check block-based safelists (non-JSON rules only)
           @anonymous_safelists.any? { |sl| sl.matched_by?(request) } ||
-            @safelists.any? { |n, sl| !@json_rule_names.include?(n) && sl.matched_by?(request) }
+            @safelists.any? { |name, sl| !@json_rule_names.include?(name) && sl.matched_by?(request) }
         else
           @anonymous_safelists.any? { |sl| sl.matched_by?(request) } ||
             @safelists.any? { |_name, sl| sl.matched_by?(request) }
@@ -144,7 +144,7 @@ module Rack
           end
 
           @anonymous_blocklists.any? { |bl| bl.matched_by?(request) } ||
-            @blocklists.any? { |n, bl| !@json_rule_names.include?(n) && bl.matched_by?(request) }
+            @blocklists.any? { |name, bl| !@json_rule_names.include?(name) && bl.matched_by?(request) }
         else
           @anonymous_blocklists.any? { |bl| bl.matched_by?(request) } ||
             @blocklists.any? { |_name, bl| bl.matched_by?(request) }
@@ -187,9 +187,9 @@ module Rack
           return true if throttled
 
           # Check block-based throttles
-          @throttles.any? { |n, t| !@json_rule_names.include?(n) && t.matched_by?(request) }
+          @throttles.any? { |name, throttle| !@json_rule_names.include?(name) && throttle.matched_by?(request) }
         else
-          @throttles.any? { |_name, t| t.matched_by?(request) }
+          @throttles.any? { |_name, throttle| throttle.matched_by?(request) }
         end
       end
 
@@ -205,12 +205,12 @@ module Rack
           end
 
           # Check block-based tracks
-          @tracks.each do |n, t|
-            t.matched_by?(request) unless @json_rule_names.include?(n)
+          @tracks.each do |name, track_rule|
+            track_rule.matched_by?(request) unless @json_rule_names.include?(name)
           end
         else
-          @tracks.each_value do |t|
-            t.matched_by?(request)
+          @tracks.each_value do |track_rule|
+            track_rule.matched_by?(request)
           end
         end
       end
@@ -241,7 +241,7 @@ module Rack
         return SimulationResult.new if matches.empty?
 
         # Find the most restrictive matching throttle
-        match = matches.min_by { |m| m[:limit] }
+        match = matches.min_by { |throttle_match| throttle_match[:limit] }
         exceeded = count > match[:limit]
 
         SimulationResult.new(
@@ -295,12 +295,12 @@ module Rack
       end
 
       def deep_stringify_keys(hash)
-        hash.each_with_object({}) do |(k, v), h|
-          h[k.to_s] = case v
-                       when Hash then deep_stringify_keys(v)
-                       when Array then v.map { |e| e.is_a?(Hash) ? deep_stringify_keys(e) : e }
-                       else v
-                       end
+        hash.each_with_object({}) do |(key, value), result|
+          result[key.to_s] = case value
+                              when Hash then deep_stringify_keys(value)
+                              when Array then value.map { |element| element.is_a?(Hash) ? deep_stringify_keys(element) : element }
+                              else value
+                              end
         end
       end
 
@@ -369,7 +369,7 @@ module Rack
         end
 
         if opts[:cookies].is_a?(Hash)
-          env["HTTP_COOKIE"] = opts[:cookies].map { |k, v| "#{k}=#{v}" }.join("; ")
+          env["HTTP_COOKIE"] = opts[:cookies].map { |key, value| "#{key}=#{value}" }.join("; ")
         end
 
         Request.new(env)
@@ -461,8 +461,8 @@ module Rack
         result = stringify_native_result(result)
         request.env[cache_key] = result
         result
-      rescue StandardError => e
-        warn "[Rack::Attack] Native evaluation failed: #{e.message}"
+      rescue StandardError => error
+        warn "[Rack::Attack] Native evaluation failed: #{error.message}"
         request.env[cache_key] = nil
         nil
       end
@@ -471,16 +471,16 @@ module Rack
         return result unless result.is_a?(Hash)
 
         stringified = {}
-        result.each do |k, v|
-          sk = k.to_s
-          stringified[sk] = case v
-                            when Array
-                              v.map { |e| e.is_a?(Hash) ? stringify_native_result(e) : e }
-                            when Hash
-                              stringify_native_result(v)
-                            else
-                              v
-                            end
+        result.each do |key, value|
+          string_key = key.to_s
+          stringified[string_key] = case value
+                                    when Array
+                                      value.map { |element| element.is_a?(Hash) ? stringify_native_result(element) : element }
+                                    when Hash
+                                      stringify_native_result(value)
+                                    else
+                                      value
+                                    end
         end
         stringified
       end

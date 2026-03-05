@@ -38,13 +38,24 @@ module Rack
             # Cache which field categories the ruleset actually needs
             @required_fields = rule_set.required_fields.to_set
             rule_set
-          rescue StandardError => e
-            warn "[Rack::Attack] Failed to compile native ruleset: #{e.message}"
+          rescue StandardError => error
+            warn "[Rack::Attack] Failed to compile native ruleset: #{error.message}"
             nil
           end
         end
 
         def request_to_native(request, required_fields = @required_fields)
+          if required_fields.nil?
+            # Fallback: send everything (backward compat)
+            return build_request_data(request, all_fields: true)
+          end
+
+          build_request_data(request, required_fields: required_fields)
+        end
+
+        private
+
+        def build_request_data(request, all_fields: false, required_fields: nil)
           env = request.env
 
           data = {
@@ -53,25 +64,23 @@ module Rack
             "ip" => request.ip || ""
           }
 
-          if required_fields.nil?
-            # Fallback: send everything (backward compat)
-            return request_to_native_full(request, env, data)
-          end
+          need = ->(field) { all_fields || required_fields.include?(field) }
 
-          data["user_agent"] = request.user_agent if required_fields.include?("user_agent")
-          data["host"] = request.host if required_fields.include?("host")
-          data["query_string"] = (request.query_string || "") if required_fields.include?("query_string")
-          data["content_length"] = (request.content_length || 0).to_i if required_fields.include?("content_length")
-          data["authorization"] = env["HTTP_AUTHORIZATION"] if required_fields.include?("authorization")
+          data["user_agent"] = request.user_agent if need.call("user_agent")
+          data["host"] = request.host if need.call("host")
+          data["query_string"] = (request.query_string || "") if need.call("query_string")
+          data["content_length"] = (request.content_length || 0).to_i if need.call("content_length")
+          data["authorization"] = env["HTTP_AUTHORIZATION"] if need.call("authorization")
 
-          if required_fields.include?("body") && request.body
-            request.body.rewind
+          body = request.body
+          if need.call("body") && body
+            body.rewind
             # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
-            data["body"] = request.body.read(MAX_BODY_SIZE)
-            request.body.rewind
+            data["body"] = body.read(MAX_BODY_SIZE)
+            body.rewind
           end
 
-          if required_fields.include?("headers")
+          if need.call("headers")
             headers = {}
             env.each do |key, value|
               next unless key.is_a?(String) && value.is_a?(String)
@@ -84,50 +93,10 @@ module Rack
             data["headers"] = headers
           end
 
-          if required_fields.include?("cookies") && request.respond_to?(:cookies) && request.cookies.is_a?(Hash)
-            data["cookies"] = request.cookies
+          cookies = request.respond_to?(:cookies) ? request.cookies : nil
+          if need.call("cookies") && cookies.is_a?(Hash)
+            data["cookies"] = cookies
           end
-
-          data
-        end
-
-        private
-
-        def request_to_native_full(request, env, data)
-          headers = {}
-          cookies = {}
-
-          env.each do |key, value|
-            next unless key.is_a?(String) && value.is_a?(String)
-
-            if key.start_with?("HTTP_") && key != "HTTP_HOST" && key != "HTTP_USER_AGENT" && key != "HTTP_AUTHORIZATION"
-              header_name = key[5..].downcase.tr("_", "-")
-              headers[header_name] = value
-            end
-          end
-
-          if request.respond_to?(:cookies) && request.cookies.is_a?(Hash)
-            cookies = request.cookies
-          end
-
-          body = nil
-          if request.body
-            request.body.rewind
-            # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
-            body = request.body.read(MAX_BODY_SIZE)
-            request.body.rewind
-          end
-
-          data.merge!(
-            "user_agent" => request.user_agent,
-            "host" => request.host,
-            "query_string" => request.query_string || "",
-            "content_length" => (request.content_length || 0).to_i,
-            "authorization" => env["HTTP_AUTHORIZATION"],
-            "body" => body,
-            "headers" => headers,
-            "cookies" => cookies
-          )
 
           data
         end

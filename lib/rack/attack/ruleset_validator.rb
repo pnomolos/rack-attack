@@ -64,8 +64,8 @@ module Rack
         end
 
         seen_names = {}
-        rules.each_with_index do |rule, i|
-          validate_rule(rule, i)
+        rules.each_with_index do |rule, index|
+          validate_rule(rule, index)
 
           # Detect duplicate rule names
           if rule.is_a?(Hash)
@@ -92,11 +92,11 @@ module Rack
       def normalize(data)
         case data
         when Hash
-          data.each_with_object({}) do |(k, v), h|
-            h[k.to_s] = normalize(v)
+          data.each_with_object({}) do |(key, value), hash|
+            hash[key.to_s] = normalize(value)
           end
         when Array
-          data.map { |e| normalize(e) }
+          data.map { |element| normalize(element) }
         else
           data
         end
@@ -112,22 +112,30 @@ module Rack
 
         rule = normalize(rule)
 
+        name = rule["name"]
+        type = rule["type"]
+        condition = rule["condition"]
+        enabled = rule["enabled"]
+        limit = rule["limit"]
+        period = rule["period"]
+        key_fields = rule["key"]
+
         # Required fields
-        unless rule["name"].is_a?(String) && !rule["name"].empty?
+        unless name.is_a?(String) && !name.empty?
           @errors << "#{prefix}: missing or empty \"name\""
         else
-          prefix = "Rule \"#{rule["name"]}\""
+          prefix = "Rule \"#{name}\""
         end
 
         unless rule.key?("type")
           @errors << "#{prefix}: missing \"type\""
         end
 
-        if rule["type"] && !VALID_TYPES.include?(rule["type"])
-          @errors << "#{prefix}: invalid type \"#{rule["type"]}\", must be one of: #{VALID_TYPES.join(", ")}"
+        if type && !VALID_TYPES.include?(type)
+          @errors << "#{prefix}: invalid type \"#{type}\", must be one of: #{VALID_TYPES.join(", ")}"
         end
 
-        if rule.key?("enabled") && ![true, false].include?(rule["enabled"])
+        if rule.key?("enabled") && ![true, false].include?(enabled)
           @errors << "#{prefix}: \"enabled\" must be a boolean"
         end
 
@@ -137,34 +145,34 @@ module Rack
 
         # Disabled rules only need name, type, enabled, and description validated.
         # Skip condition/throttle/key checks since the rule will never be evaluated.
-        return if rule["enabled"] == false
+        return if enabled == false
 
         unless rule.key?("condition")
           @errors << "#{prefix}: missing \"condition\""
         end
 
         # Throttle-specific fields
-        if rule["type"] == "throttle"
-          unless rule["limit"].is_a?(Numeric) && rule["limit"] > 0
+        if type == "throttle"
+          unless limit.is_a?(Numeric) && limit > 0
             @errors << "#{prefix}: throttle requires a positive numeric \"limit\""
           end
 
-          unless rule["period"].is_a?(Numeric) && rule["period"] > 0
+          unless period.is_a?(Numeric) && period > 0
             @errors << "#{prefix}: throttle requires a positive numeric \"period\""
           end
 
           # Validate throttle key field names
-          if rule["key"].is_a?(Array)
-            rule["key"].each do |k|
-              unless valid_field?(k.to_s)
-                @errors << "#{prefix}: invalid key field \"#{k}\""
+          if key_fields.is_a?(Array)
+            key_fields.each do |field|
+              unless valid_field?(field.to_s)
+                @errors << "#{prefix}: invalid key field \"#{field}\""
               end
             end
           end
         end
 
         # Validate condition structure
-        validate_condition(rule["condition"], prefix) if rule["condition"]
+        validate_condition(condition, prefix) if condition
       end
 
       def validate_condition(condition, prefix, depth: 0)
@@ -180,20 +188,24 @@ module Rack
 
         condition = normalize(condition)
 
+        and_conditions = condition["and"]
+        or_conditions = condition["or"]
+        not_condition = condition["not"]
+
         if condition.key?("and")
-          unless condition["and"].is_a?(Array)
+          unless and_conditions.is_a?(Array)
             @errors << "#{prefix}: \"and\" must be an Array"
             return
           end
-          condition["and"].each { |c| validate_condition(c, prefix, depth: depth + 1) }
+          and_conditions.each { |sub_condition| validate_condition(sub_condition, prefix, depth: depth + 1) }
         elsif condition.key?("or")
-          unless condition["or"].is_a?(Array)
+          unless or_conditions.is_a?(Array)
             @errors << "#{prefix}: \"or\" must be an Array"
             return
           end
-          condition["or"].each { |c| validate_condition(c, prefix, depth: depth + 1) }
+          or_conditions.each { |sub_condition| validate_condition(sub_condition, prefix, depth: depth + 1) }
         elsif condition.key?("not")
-          validate_condition(condition["not"], prefix, depth: depth + 1)
+          validate_condition(not_condition, prefix, depth: depth + 1)
         elsif condition.key?("field")
           validate_leaf_condition(condition, prefix)
         else
@@ -234,8 +246,8 @@ module Rack
             if value.is_a?(String)
               begin
                 Regexp.new(value)
-              rescue RegexpError => e
-                @errors << "#{prefix}: invalid regex \"#{value}\": #{e.message}"
+              rescue RegexpError => error
+                @errors << "#{prefix}: invalid regex \"#{value}\": #{error.message}"
               end
             end
           when "in_ip_range", "not_in_ip_range"
@@ -259,9 +271,9 @@ module Rack
         if leaf.key?("transform")
           transforms = leaf["transform"]
           transforms = [transforms] unless transforms.is_a?(Array)
-          transforms.each do |t|
-            unless VALID_TRANSFORMS.include?(t)
-              @errors << "#{prefix}: invalid transform \"#{t}\", must be one of: #{VALID_TRANSFORMS.join(", ")}"
+          transforms.each do |transform|
+            unless VALID_TRANSFORMS.include?(transform)
+              @errors << "#{prefix}: invalid transform \"#{transform}\", must be one of: #{VALID_TRANSFORMS.join(", ")}"
             end
           end
         end
@@ -279,17 +291,19 @@ module Rack
           return
         end
 
-        jwt_keys.each_with_index do |entry, i|
+        jwt_keys.each_with_index do |entry, index|
           unless entry.is_a?(Hash)
-            @errors << "jwt_keys[#{i}]: must be a Hash"
+            @errors << "jwt_keys[#{index}]: must be a Hash"
             next
           end
           entry = normalize(entry)
-          unless entry["algorithm"].is_a?(String) && !entry["algorithm"].empty?
-            @errors << "jwt_keys[#{i}]: missing or empty \"algorithm\""
+          algorithm = entry["algorithm"]
+          key = entry["key"]
+          unless algorithm.is_a?(String) && !algorithm.empty?
+            @errors << "jwt_keys[#{index}]: missing or empty \"algorithm\""
           end
-          unless entry["key"].is_a?(String) && !entry["key"].empty?
-            @errors << "jwt_keys[#{i}]: missing or empty \"key\""
+          unless key.is_a?(String) && !key.empty?
+            @errors << "jwt_keys[#{index}]: missing or empty \"key\""
           end
         end
       end
