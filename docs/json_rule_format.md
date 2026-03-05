@@ -9,6 +9,7 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
 
 ## Table of Contents
 
+- [JSON Schema](#json-schema)
 - [Quick Start](#quick-start)
 - [Loading Rules](#loading-rules)
   - [`load_ruleset(source, replace:, jwt_keys:)`](#load_rulesetsource-replace-jwt_keys)
@@ -55,6 +56,33 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
 - [Code Reloading (Rails Development Mode)](#code-reloading-rails-development-mode)
 - [Error Handling](#error-handling)
 - [Known Behavioral Differences Between Ruby and Rust Evaluators](#known-behavioral-differences-between-ruby-and-rust-evaluators)
+
+## JSON Schema
+
+A [JSON Schema](json_rule_schema.json) is available for the ruleset format (Draft 2020-12). It provides IDE autocompletion, inline validation, and can be used for CI pre-flight checks without a Ruby runtime.
+
+**Add `$schema` to your ruleset for editor support:**
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/rack/rack-attack/main/docs/json_rule_schema.json",
+  "rules": [...]
+}
+```
+
+Most editors (VS Code, JetBrains, Neovim with LSP) will use the `$schema` property to offer autocompletion and validation automatically.
+
+**Validate in CI:**
+
+```bash
+# With check-jsonschema (pip install check-jsonschema)
+check-jsonschema --schemafile docs/json_rule_schema.json config/rack_attack_rules.json
+
+# With ajv-cli (npm install -g ajv-cli)
+ajv validate -s docs/json_rule_schema.json -d config/rack_attack_rules.json --spec=draft2020
+```
+
+> **Note**: The `$schema` property is not part of the ruleset format itself — the native engine and Ruby evaluator both ignore it. It is only used by editors and external validators.
 
 ## Quick Start
 

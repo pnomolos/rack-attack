@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rack/rack-attack/blob/main/docs/json_rule_schema.json",
+  "title": "Rack::Attack JSON Ruleset",
+  "description": "Schema for Rack::Attack declarative JSON rule format. See docs/json_rule_format.md for full documentation.",
+  "type": "object",
+  "properties": {
+    "rules": {
+      "type": "array",
+      "description": "Array of rule objects to evaluate against incoming requests.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "rule_order": {
+      "type": "string",
+      "enum": ["cost", "insertion"],
+      "description": "How rules are ordered within each type. 'cost' sorts by estimated evaluation cost (default, native engine only). 'insertion' preserves JSON array order."
+    },
+    "jwt_keys": {
+      "type": "array",
+      "description": "JWT signing keys for verified JWT field access.",
+      "items": { "$ref": "#/$defs/jwt_key" }
+    }
+  },
+  "required": ["rules"],
+  "additionalProperties": false,
+
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique identifier for the rule. Used in logging and rack.attack.matched."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["safelist", "blocklist", "throttle", "track"],
+          "description": "Rule type determining how a match affects the request."
+        },
+        "condition": {
+          "$ref": "#/$defs/condition",
+          "description": "Condition tree to evaluate. null means 'always match'."
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set to false to disable a rule without removing it."
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description. Not used during evaluation."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum requests allowed in the period (throttle only)."
+        },
+        "period": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Time window in seconds (throttle only)."
+        },
+        "key": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "description": "Field names used to build the throttle discriminator key. Defaults to [\"ip.src\"]."
+        }
+      },
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "throttle" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["limit", "period"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "not": { "const": "throttle" } } },
+            "required": ["type"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["limit"] },
+                { "required": ["period"] },
+                { "required": ["key"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "enabled": { "const": false } }
+          },
+          "then": true,
+          "else": {
+            "required": ["condition"]
+          }
+        }
+      ]
+    },
+
+    "condition": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/leaf_condition" },
+        { "$ref": "#/$defs/and_condition" },
+        { "$ref": "#/$defs/or_condition" },
+        { "$ref": "#/$defs/not_condition" }
+      ]
+    },
+
+    "leaf_condition": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string",
+          "pattern": "^(ip\\.src|http\\.request\\.(uri\\.path(\\.extension)?|method|uri\\.query|uri|body\\.(size|raw))|http\\.(user_agent|host)|jwt\\.valid|http\\.request\\.(headers|cookies|uri\\.args)\\[\"[^\"]+\"\\]|http\\.request\\.body\\.json\\[\"[^\"]+\"\\]|jwt\\.(payload|header|verified_payload)\\[\"[^\"]+\"\\])$",
+          "description": "Request field to extract. Uses dot-notation with bracket syntax for parameterized fields."
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "eq", "ne", "contains", "starts_with", "ends_with",
+            "matches", "wildcard",
+            "in", "not_in",
+            "in_ip_range", "not_in_ip_range",
+            "gt", "lt", "gte", "lte",
+            "exists", "not_exists"
+          ],
+          "description": "Comparison operator."
+        },
+        "value": {
+          "description": "Value to compare against. Type depends on the operator."
+        },
+        "transform": {
+          "$ref": "#/$defs/transform",
+          "description": "Transform(s) to apply to the field value before comparison."
+        }
+      },
+      "required": ["field", "operator"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["exists", "not_exists"] } }
+          },
+          "then": {
+            "not": { "required": ["value"] }
+          }
+        },
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["in", "not_in", "in_ip_range", "not_in_ip_range"] } }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              }
+            },
+            "required": ["value"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["gt", "lt", "gte", "lte"] } }
+          },
+          "then": {
+            "properties": {
+              "value": { "type": "number" }
+            },
+            "required": ["value"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["eq", "ne", "contains", "starts_with", "ends_with", "matches", "wildcard"] } }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "number" }
+                ]
+              }
+            },
+            "required": ["value"]
+          }
+        }
+      ]
+    },
+
+    "and_condition": {
+      "type": "object",
+      "properties": {
+        "and": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition" },
+          "minItems": 1
+        }
+      },
+      "required": ["and"],
+      "additionalProperties": false
+    },
+
+    "or_condition": {
+      "type": "object",
+      "properties": {
+        "or": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/condition" },
+          "minItems": 1
+        }
+      },
+      "required": ["or"],
+      "additionalProperties": false
+    },
+
+    "not_condition": {
+      "type": "object",
+      "properties": {
+        "not": { "$ref": "#/$defs/condition" }
+      },
+      "required": ["not"],
+      "additionalProperties": false
+    },
+
+    "transform": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": ["lower", "upper", "url_decode", "length"]
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["lower", "upper", "url_decode", "length"]
+          },
+          "minItems": 1
+        }
+      ]
+    },
+
+    "jwt_key": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "PS256", "PS384", "PS512"],
+          "description": "JWT signing algorithm."
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Signing key (secret for HMAC, PEM-encoded public key for RSA/ECDSA)."
+        }
+      },
+      "required": ["algorithm", "key"],
+      "additionalProperties": false
+    }
+  }
+}
