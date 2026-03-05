@@ -322,7 +322,13 @@ Rack::Attack.load_ruleset({
 
 The JSON format supports 17 operators (`eq`, `in`, `matches`, `in_ip_range`, `wildcard`, etc.), field extraction from headers/cookies/query params/JWT claims, transforms (`lower`, `url_decode`, etc.), and logical combinators (`and`, `or`, `not`).
 
-For the complete format reference, see the **[JSON Rule Format documentation](docs/json_rule_format.md)**.
+Use `validate: true` to catch configuration errors at load time:
+
+```ruby
+Rack::Attack.load_ruleset("rules.json", validate: true)  # raises ArgumentError on invalid rules
+```
+
+For the complete format reference including thread safety, code reloading, and error handling, see the **[JSON Rule Format documentation](docs/json_rule_format.md)**.
 
 ### Cache store configuration
 
@@ -337,7 +343,9 @@ Rack::Attack.cache.store = ActiveSupport::Cache::RedisCacheStore.new(url: "...")
 
 Most applications should use a new, separate database used only for `rack-attack`. During an actual attack or periods of heavy load, this database will come under heavy load. Keeping it on a separate database instance will give you additional resilience and make sure that other functions (like caching for your application) don't go down.
 
-Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment` and `write` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html). This means that other cache stores which inherit from ActiveSupport::Cache::Store are also compatible. In-memory stores which are not backed by an external database, such as `ActiveSupport::Cache::MemoryStore.new`, will be mostly ineffective because each Ruby process in your deployment will have it's own state, effectively multiplying the number of requests each client can make by the number of Ruby processes you have deployed.
+Note that `Rack::Attack.cache` is only used for throttling, allow2ban and fail2ban filtering; not blocklisting and safelisting. Your cache store must implement `increment`, `write`, `read`, and `delete` like [ActiveSupport::Cache::Store](http://api.rubyonrails.org/classes/ActiveSupport/Cache/Store.html). The store is validated at assignment time — an `ArgumentError` is raised immediately if required methods are missing, rather than failing at runtime on the first throttled request.
+
+In-memory stores which are not backed by an external database, such as `ActiveSupport::Cache::MemoryStore.new`, will be mostly ineffective because each Ruby process in your deployment will have it's own state, effectively multiplying the number of requests each client can make by the number of Ruby processes you have deployed.
 
 ## Customizing responses
 

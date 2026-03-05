@@ -51,6 +51,9 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
   - [ReDoS Risk in the Ruby Fallback Evaluator](#redos-risk-in-the-ruby-fallback-evaluator)
   - [Request Body Size](#request-body-size)
   - [Regex Pattern Safety Recommendations](#regex-pattern-safety-recommendations)
+- [Thread Safety](#thread-safety)
+- [Code Reloading (Rails Development Mode)](#code-reloading-rails-development-mode)
+- [Error Handling](#error-handling)
 - [Known Behavioral Differences Between Ruby and Rust Evaluators](#known-behavioral-differences-between-ruby-and-rust-evaluators)
 
 ## Quick Start
@@ -101,10 +104,10 @@ Rack::Attack.load_ruleset(Rails.root.join("config/rack_attack_rules.json").to_s)
 
 ## Loading Rules
 
-### `load_ruleset(source, replace:, jwt_keys:)`
+### `load_ruleset(source, replace:, jwt_keys:, validate:)`
 
 ```ruby
-Rack::Attack.load_ruleset(source, replace: false, jwt_keys: nil)
+Rack::Attack.load_ruleset(source, replace: false, jwt_keys: nil, validate: false)
 ```
 
 | Parameter | Type | Default | Description |
@@ -112,6 +115,7 @@ Rack::Attack.load_ruleset(source, replace: false, jwt_keys: nil)
 | `source` | String, Hash | *(required)* | File path (ending in `.json`), JSON string, or Ruby Hash |
 | `replace` | Boolean | `false` | If `true`, clears all existing rules before loading |
 | `jwt_keys` | Array | `nil` | Override JWT key configuration (see [JWT Configuration](#jwt-configuration)) |
+| `validate` | Boolean | `false` | If `true`, validates the ruleset before loading and raises `ArgumentError` on errors |
 
 ### Input Formats
 
@@ -147,6 +151,10 @@ Calling `load_ruleset` multiple times appends rules:
 Rack::Attack.load_ruleset("/path/to/base_rules.json")
 Rack::Attack.load_ruleset("/path/to/extra_rules.json")  # adds to existing rules
 ```
+
+If a rule in the second load has the same `name` as a rule from the first load, the new rule overrides the old one and a warning is emitted. Rule names must be unique across all loads.
+
+JWT key configuration persists across loads: if the first load provides `jwt_keys` and the second does not, the original keys remain available for rules in the second load.
 
 ### Replacing Rules
 
@@ -611,11 +619,21 @@ Use `validate_ruleset` to check a ruleset for structural errors before loading:
 
 ```ruby
 result = Rack::Attack.validate_ruleset(source)
-result.valid?   # => true or false
-result.errors   # => ["Rule #0: missing \"condition\"", ...]
+result.valid?    # => true or false
+result.errors    # => ["Rule #0: missing \"condition\"", ...]
+result.warnings  # => ["Rule #1 \"my-rule\": duplicate name...", ...]
 ```
 
 The `source` parameter accepts the same formats as `load_ruleset` (file path, JSON string, or Ruby Hash). Validation checks rule types, operators, field names, transforms, throttle requirements, condition nesting depth (max 20), and JWT key structure.
+
+**Errors** are critical issues that prevent loading (e.g., missing condition, invalid operator). **Warnings** are informational (e.g., duplicate rule names, unusually high throttle limits). The `valid?` method only checks errors — a ruleset with warnings but no errors is considered valid.
+
+You can also validate automatically during loading:
+
+```ruby
+# Raises ArgumentError if validation errors are found
+Rack::Attack.load_ruleset(source, validate: true)
+```
 
 ## Interaction with Block-Based Rules
 
@@ -919,6 +937,62 @@ When writing `matches` patterns:
 - **Use literal operators for simple cases**: `starts_with`, `ends_with`, `contains`, and `eq` are faster and safer than equivalent regex.
 - **Test with adversarial input**: Before deploying a new `matches` pattern, test it against long strings of repeated characters to confirm it completes quickly.
 - **Remember engine differences**: Patterns valid in Ruby's regex engine may not work in the Rust engine (see [Known Behavioral Differences](#known-behavioral-differences-between-ruby-and-rust-evaluators)).
+
+## Thread Safety
+
+Configuration mutations (`load_ruleset`, `clear_configuration`) are protected by a mutex, making them safe to call from any thread. Request evaluation reads a snapshot of the current configuration, so an in-flight request is not affected by concurrent rule changes.
+
+On CRuby (MRI), the GVL provides additional serialization. The mutex also protects JRuby and TruffleRuby deployments where true thread concurrency exists.
+
+**Best practice**: Load your ruleset during application boot (e.g., in a Rails initializer) before the server starts accepting requests. This avoids any concurrent access considerations entirely.
+
+## Code Reloading (Rails Development Mode)
+
+Rack::Attack is loaded via `require` (through Bundler), not autoloaded by Zeitwerk. This means:
+
+- **Configuration survives code reloads.** When Rails reloads autoloaded code in development, `Rack::Attack` and its configuration are not affected.
+- **Spring and bootsnap** work correctly. The native Rust extension has no file descriptors or shared memory regions that would break across process preloading.
+- **Puma/Unicorn forking** works correctly. The native `RuleSet` contains only owned heap data with no OS-level resources.
+
+### Avoid duplicate rules in `to_prepare` blocks
+
+If you configure Rack::Attack in a `to_prepare` block (which re-runs on every code reload), always use `replace: true` to avoid accumulating duplicate rules:
+
+```ruby
+# config/initializers/rack_attack.rb
+
+# WRONG — rules accumulate on every reload:
+Rails.application.config.to_prepare do
+  Rack::Attack.load_ruleset(Rails.root.join("config/rack_attack_rules.json").to_s)
+end
+
+# CORRECT — clears before reloading:
+Rails.application.config.to_prepare do
+  Rack::Attack.load_ruleset(Rails.root.join("config/rack_attack_rules.json").to_s, replace: true)
+end
+```
+
+For most applications, configuring in a standard initializer (outside `to_prepare`) is simpler and sufficient.
+
+## Error Handling
+
+Rack::Attack is designed to **fail open** — errors in rule evaluation never block legitimate requests.
+
+### User block errors
+
+If a block-based rule (safelist, blocklist, throttle, or track) raises an exception, the error is logged via `warn` and the rule is treated as non-matching. Other rules continue to evaluate normally.
+
+### Native engine errors
+
+If the native Rust engine raises an error during evaluation (e.g., due to unexpected input), the error is logged and the request proceeds as if no native rules matched. Block-based rules still evaluate normally.
+
+### JWT decode errors
+
+If JWT token decoding or verification fails (malformed token, invalid signature, missing `jwt` gem), the JWT field returns `nil` and evaluation continues. A warning is emitted to help diagnose configuration issues.
+
+### Cache store validation
+
+The cache store is validated when assigned. If the store object is missing required methods (`:read`, `:write`, `:increment`, `:delete`), an `ArgumentError` is raised immediately rather than failing at runtime on the first throttled request.
 
 ## Known Behavioral Differences Between Ruby and Rust Evaluators
 
