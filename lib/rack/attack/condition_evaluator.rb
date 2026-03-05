@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
+require "base64"
 require "ipaddr"
-require "uri"
 require "json"
+require "openssl"
+require "uri"
 
 module Rack
   class Attack
@@ -124,9 +126,9 @@ module Rack
             body = @request.body
             return nil unless body
 
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
             content = body.read(MAX_BODY_SIZE)
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
             content
           when /\Ahttp\.request\.headers\["([^"]+)"\]\z/
             header_name = Regexp.last_match(1)
@@ -162,7 +164,7 @@ module Rack
         end
 
         def symbolize_condition(cond)
-          return cond if cond.is_a?(Hash) && cond.keys.first.is_a?(Symbol)
+          return cond if cond.is_a?(Hash) && cond.keys.all? { |k| k.is_a?(Symbol) }
 
           if cond.is_a?(Hash)
             cond.each_with_object({}) do |(key, value), hash|
@@ -328,7 +330,7 @@ module Rack
             return nil unless token
 
             parts = token.split(".")
-            return nil if parts.length < 2
+            return nil if parts.length != 3
 
             payload_b64 = parts[1]
             # Add padding
@@ -349,7 +351,7 @@ module Rack
             return nil unless token
 
             parts = token.split(".")
-            return nil if parts.empty?
+            return nil if parts.length != 3
 
             header_b64 = parts[0]
             header_b64 += "=" * ((4 - header_b64.length % 4) % 4)

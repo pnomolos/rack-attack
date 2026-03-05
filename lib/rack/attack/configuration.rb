@@ -168,6 +168,10 @@ module Rack
             current_limit = tm["limit"]
             current_period = tm["period"]
 
+            if Rack::Attack.throttle_discriminator_normalizer
+              discriminator = Rack::Attack.throttle_discriminator_normalizer.call(discriminator)
+            end
+
             count = Rack::Attack.cache.count("#{name}:#{discriminator}", current_period)
             data = {
               discriminator: discriminator,
@@ -468,7 +472,7 @@ module Rack
         if @json_rules.any?
           ruleset = NativeBridge.compile_ruleset(@json_rules, jwt_keys: @jwt_keys, rule_order: @rule_order)
           if ruleset
-            @required_fields = ruleset.required_fields.to_set
+            @required_fields = ruleset.required_fields.to_set.freeze
             @native_ruleset = ruleset
           else
             @native_ruleset = nil
@@ -481,14 +485,15 @@ module Rack
       end
 
       def evaluate_native(request)
-        # Read-copy: grab a local reference so concurrent rebuilds don't affect us
+        # Read-copy: grab local references so concurrent rebuilds don't affect us
         ruleset = @native_ruleset
+        required_fields = @required_fields
         return nil unless ruleset
 
         cache_key = "rack.attack.native_result"
         return request.env[cache_key] if request.env.key?(cache_key)
 
-        native_request = NativeBridge.request_to_native(request, @required_fields)
+        native_request = NativeBridge.request_to_native(request, required_fields)
         result = ruleset.evaluate(native_request)
         # serde_magnus returns symbol keys; normalize to string keys
         result = stringify_native_result(result)

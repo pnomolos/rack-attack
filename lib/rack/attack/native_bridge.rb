@@ -72,10 +72,10 @@ module Rack
 
           body = request.body
           if need.call("body") && body
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
             # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
             data["body"] = body.read(MAX_BODY_SIZE)
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
           end
 
           if need.call("headers")
