@@ -23,6 +23,7 @@
     "jwt_keys": {
       "type": "array",
       "description": "JWT signing keys for verified JWT field access.",
+      "minItems": 1,
       "items": { "$ref": "#/$defs/jwt_key" }
     }
   },
@@ -68,10 +69,7 @@
         },
         "key": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1
-          },
+          "items": { "$ref": "#/$defs/field_name" },
           "minItems": 1,
           "description": "Field names used to build the throttle discriminator key. Defaults to [\"ip.src\"]."
         }
@@ -81,7 +79,10 @@
       "allOf": [
         {
           "if": {
-            "properties": { "type": { "const": "throttle" } },
+            "properties": {
+              "type": { "const": "throttle" },
+              "enabled": { "not": { "const": false } }
+            },
             "required": ["type"]
           },
           "then": {
@@ -130,8 +131,7 @@
       "type": "object",
       "properties": {
         "field": {
-          "type": "string",
-          "pattern": "^(ip\\.src|http\\.request\\.(uri\\.path(\\.extension)?|method|uri\\.query|uri|body\\.(size|raw))|http\\.(user_agent|host)|jwt\\.valid|http\\.request\\.(headers|cookies|uri\\.args)\\[\"[^\"]+\"\\]|http\\.request\\.body\\.json\\[\"[^\"]+\"\\]|jwt\\.(payload|header|verified_payload)\\[\"[^\"]+\"\\])$",
+          "$ref": "#/$defs/field_name",
           "description": "Request field to extract. Uses dot-notation with bracket syntax for parameterized fields."
         },
         "operator": {
@@ -217,7 +217,19 @@
         },
         {
           "if": {
-            "properties": { "operator": { "enum": ["eq", "ne", "contains", "starts_with", "ends_with", "matches", "wildcard"] } },
+            "properties": { "operator": { "enum": ["contains", "starts_with", "ends_with", "matches", "wildcard"] } },
+            "required": ["operator"]
+          },
+          "then": {
+            "properties": {
+              "value": { "type": "string" }
+            },
+            "required": ["value"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "operator": { "enum": ["eq", "ne"] } },
             "required": ["operator"]
           },
           "then": {
@@ -285,6 +297,11 @@
           "minItems": 1
         }
       ]
+    },
+
+    "field_name": {
+      "type": "string",
+      "pattern": "^(ip\\.src|http\\.request\\.(uri\\.path(\\.extension)?|method|uri\\.query|uri|body\\.(size|raw))|http\\.(user_agent|host)|jwt\\.valid|http\\.request\\.(headers|cookies|uri\\.args)\\[\"[^\"]+\"\\]|http\\.request\\.body\\.json\\[\"[^\"]+\"\\]|jwt\\.(payload|header|verified_payload)\\[\"[^\"]+\"\\])$"
     },
 
     "jwt_key": {

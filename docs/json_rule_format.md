@@ -83,6 +83,8 @@ ajv validate -s docs/json_rule_schema.json -d config/rack_attack_rules.json --sp
 ```
 
 > **Note**: The `$schema` property is not part of the ruleset format itself — the native engine and Ruby evaluator both ignore it. It is only used by editors and external validators.
+>
+> The JSON Schema does not enforce the maximum condition nesting depth of 20 levels. Use `validate_ruleset` or `load_ruleset(source, validate: true)` for full runtime validation including depth checks.
 
 ## Quick Start
 
