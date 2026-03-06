@@ -13,6 +13,7 @@ module Rack
 
       VALID_TRANSFORMS = %w[lower upper url_decode length].freeze
       VALID_RULE_ORDERS = %w[cost insertion].freeze
+      VALID_JWT_ALGORITHMS = %w[HS256 HS384 HS512 RS256 RS384 RS512 ES256 ES384 PS256 PS384 PS512].freeze
 
       STATIC_FIELDS = %w[
         ip.src
@@ -247,7 +248,22 @@ module Rack
           value = leaf["value"]
 
           case operator
+          when "eq", "ne"
+            unless value.is_a?(String) || value.is_a?(Numeric)
+              @errors << "#{prefix}: operator \"#{operator}\" requires a string or numeric value, got #{value.class}"
+            end
+          when "in", "not_in"
+            unless value.is_a?(Array) && value.all? { |v| v.is_a?(String) }
+              @errors << "#{prefix}: operator \"#{operator}\" requires an array of strings"
+            end
+          when "contains", "starts_with", "ends_with", "wildcard"
+            unless value.is_a?(String)
+              @errors << "#{prefix}: operator \"#{operator}\" requires a string value, got #{value.class}"
+            end
           when "matches"
+            unless value.is_a?(String)
+              @errors << "#{prefix}: operator \"#{operator}\" requires a string value, got #{value.class}"
+            end
             if value.is_a?(String)
               begin
                 Regexp.new(value)
@@ -306,6 +322,9 @@ module Rack
           key = entry["key"]
           unless algorithm.is_a?(String) && !algorithm.empty?
             @errors << "jwt_keys[#{index}]: missing or empty \"algorithm\""
+          end
+          if algorithm.is_a?(String) && !algorithm.empty? && !VALID_JWT_ALGORITHMS.include?(algorithm)
+            @errors << "jwt_keys[#{index}]: unsupported algorithm \"#{algorithm}\", must be one of: #{VALID_JWT_ALGORITHMS.join(", ")}"
           end
           unless key.is_a?(String) && !key.empty?
             @errors << "jwt_keys[#{index}]: missing or empty \"key\""

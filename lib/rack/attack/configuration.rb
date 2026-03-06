@@ -297,6 +297,8 @@ module Rack
         @rule_order = nil
         @required_fields = nil
         @native_ruleset = nil
+
+        ConditionEvaluator.clear_regex_cache!
       end
 
       def parse_source(source)

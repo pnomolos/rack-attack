@@ -294,18 +294,20 @@ module Rack
         end
 
         def parse_body_json
-          @body_json ||= begin
+          return @body_json if defined?(@body_json)
+
+          @body_json = begin
             body = @request.body
             return nil unless body
 
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
             # Read at most MAX_BODY_SIZE bytes to avoid exhausting memory on huge uploads.
             content = body.read(MAX_BODY_SIZE)
-            body.rewind
+            body.rewind if body.respond_to?(:rewind)
             return nil if content.nil? || content.empty?
 
             JSON.parse(content)
-          rescue JSON::ParserError
+          rescue JSON::ParserError, IOError, Errno::EBADF
             nil
           end
         end
