@@ -429,7 +429,7 @@ fn eval_leaf(
                         FieldValue::Str(cow) => cow.len() as u64,
                         FieldValue::OptStr(Some(cow)) => cow.len() as u64,
                         FieldValue::OptStr(None) => unreachable!("None filtered above"),
-                        FieldValue::Number(n) => *n,
+                        FieldValue::Number(n) => n.to_string().len() as u64,
                     };
                     return eval_numeric(len, operator, compiled);
                 }

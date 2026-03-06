@@ -55,7 +55,7 @@ class ConformanceSpec < Minitest::Test
       "REMOTE_ADDR" => (data[:ip] || "127.0.0.1"),
       "SERVER_NAME" => "localhost",
       "SERVER_PORT" => "80",
-      "HTTP_HOST" => "localhost",
+      "HTTP_HOST" => (data[:host] || "localhost"),
       "rack.input" => StringIO.new(data[:body] || ""),
       "rack.url_scheme" => "http",
     }
@@ -83,6 +83,7 @@ class ConformanceSpec < Minitest::Test
       query_string: data[:query_string] || "",
       content_length: (data[:content_length] || 0).to_i,
     }
+    native[:host] = data[:host] if data[:host]
     native[:user_agent] = data[:user_agent] if data[:user_agent]
     native[:headers] = (data[:headers] || {}).transform_keys { |k| k.downcase.tr("_", "-") }
     native[:cookies] = data[:cookies] || {}
@@ -1476,5 +1477,24 @@ class ConformanceSpec < Minitest::Test
   def test_eq_numeric_vs_non_numeric_string
     cond = { "field" => "http.user_agent", "operator" => "eq", "value" => 42 }
     assert_conformance(cond, { user_agent: "Mozilla/5.0" }, false, "eq numeric vs non-numeric string")
+  end
+
+  # ===========================================================================
+  # http.host field
+  # ===========================================================================
+
+  def test_host_eq
+    cond = { "field" => "http.host", "operator" => "eq", "value" => "api.example.com" }
+    assert_conformance(cond, { host: "api.example.com" }, true, "host eq match")
+  end
+
+  def test_host_eq_no_match
+    cond = { "field" => "http.host", "operator" => "eq", "value" => "api.example.com" }
+    assert_conformance(cond, { host: "other.example.com" }, false, "host eq no match")
+  end
+
+  def test_host_contains
+    cond = { "field" => "http.host", "operator" => "contains", "value" => "example" }
+    assert_conformance(cond, { host: "api.example.com" }, true, "host contains")
   end
 end

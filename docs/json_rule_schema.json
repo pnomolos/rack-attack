@@ -127,6 +127,16 @@
       ]
     },
 
+    "inner_condition": {
+      "description": "A condition used inside logical combinators (null not permitted).",
+      "oneOf": [
+        { "$ref": "#/$defs/leaf_condition" },
+        { "$ref": "#/$defs/and_condition" },
+        { "$ref": "#/$defs/or_condition" },
+        { "$ref": "#/$defs/not_condition" }
+      ]
+    },
+
     "leaf_condition": {
       "type": "object",
       "properties": {
@@ -252,7 +262,7 @@
       "properties": {
         "and": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition" },
+          "items": { "$ref": "#/$defs/inner_condition" },
           "minItems": 1
         }
       },
@@ -265,7 +275,7 @@
       "properties": {
         "or": {
           "type": "array",
-          "items": { "$ref": "#/$defs/condition" },
+          "items": { "$ref": "#/$defs/inner_condition" },
           "minItems": 1
         }
       },
@@ -276,7 +286,7 @@
     "not_condition": {
       "type": "object",
       "properties": {
-        "not": { "$ref": "#/$defs/condition" }
+        "not": { "$ref": "#/$defs/inner_condition" }
       },
       "required": ["not"],
       "additionalProperties": false
