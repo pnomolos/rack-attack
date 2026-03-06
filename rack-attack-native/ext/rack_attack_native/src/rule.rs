@@ -27,7 +27,7 @@ pub struct RawRule {
     pub condition: Option<RawCondition>,
     pub limit: Option<u64>,
     pub period: Option<u64>,
-    pub key: Option<Vec<String>>,
+    pub key: Option<Vec<serde_json::Value>>,
     /// Optional enable/disable toggle. Defaults to true.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -118,6 +118,13 @@ pub enum CompiledValue {
     None,
 }
 
+/// A throttle key field with optional transforms.
+#[derive(Debug)]
+pub struct KeyField {
+    pub field: Field,
+    pub transforms: Vec<Transform>,
+}
+
 /// A fully compiled rule ready for evaluation.
 #[derive(Debug)]
 pub struct Rule {
@@ -126,7 +133,7 @@ pub struct Rule {
     pub condition: Condition,
     pub limit: Option<u64>,
     pub period: Option<u64>,
-    pub key_fields: Vec<Field>,
+    pub key_fields: Vec<KeyField>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -319,10 +326,10 @@ pub fn compile_rule(raw: &RawRule) -> Result<Rule, String> {
         Some(c) => compile_condition(c)?,
         None => Condition::Always,
     };
-    let key_fields: Vec<Field> = match &raw.key {
+    let key_fields: Vec<KeyField> = match &raw.key {
         Some(keys) => keys
             .iter()
-            .map(|k| Field::parse(k))
+            .map(parse_key_field)
             .collect::<Result<Vec<_>, _>>()?,
         None => Vec::new(),
     };
@@ -336,7 +343,7 @@ pub fn compile_rule(raw: &RawRule) -> Result<Rule, String> {
 
     // Default throttle key to ip.src when not specified (matches Ruby behavior)
     let key_fields = if rule_type == RuleType::Throttle && key_fields.is_empty() {
-        vec![Field::IpSrc]
+        vec![KeyField { field: Field::IpSrc, transforms: vec![] }]
     } else {
         key_fields
     };
@@ -502,15 +509,46 @@ fn eval_leaf(
     }
 }
 
+/// Parse a key field entry from JSON: either a string or an object with "field" and optional "transform".
+fn parse_key_field(value: &serde_json::Value) -> Result<KeyField, String> {
+    match value {
+        serde_json::Value::String(s) => {
+            Ok(KeyField {
+                field: Field::parse(s)?,
+                transforms: vec![],
+            })
+        }
+        serde_json::Value::Object(obj) => {
+            let field_str = obj
+                .get("field")
+                .and_then(|v| v.as_str())
+                .ok_or("key field object requires a \"field\" string")?;
+            let field = Field::parse(field_str)?;
+            let transforms = if let Some(transform_val) = obj.get("transform") {
+                parse_transforms(&Some(transform_val.clone()))?
+            } else {
+                vec![]
+            };
+            Ok(KeyField { field, transforms })
+        }
+        _ => Err("key entry must be a string or object".to_string()),
+    }
+}
+
 /// Extract the throttle discriminator key from a request.
 pub fn extract_throttle_key(
-    key_fields: &[Field],
+    key_fields: &[KeyField],
     data: &RequestData,
     ctx: &RequestContext,
 ) -> Option<String> {
     let mut parts = Vec::with_capacity(key_fields.len());
-    for field in key_fields {
-        let val = field.extract(data, ctx);
+    for kf in key_fields {
+        let val = kf.field.extract(data, ctx);
+        let val = if kf.transforms.is_empty() {
+            val
+        } else {
+            apply_transforms(val, &kf.transforms)
+        };
         match &val {
             FieldValue::Number(n) => parts.push(n.to_string()),
             _ => match val.as_str() {
@@ -527,6 +565,7 @@ mod tests {
     use super::*;
     use crate::body::BodyData;
     use crate::query::QueryData;
+    use sha2::Digest;
     use std::collections::HashMap;
 
     fn test_request() -> RequestData {
@@ -963,7 +1002,7 @@ mod tests {
         };
         let rule = compile_rule(&raw).unwrap();
         assert_eq!(rule.key_fields.len(), 1);
-        assert!(matches!(rule.key_fields[0], Field::IpSrc));
+        assert!(matches!(rule.key_fields[0].field, Field::IpSrc));
     }
 
     #[test]
@@ -1196,12 +1235,16 @@ mod tests {
         assert!(cond.matches(&data, &ctx));
     }
 
+    fn kf(field: Field) -> KeyField {
+        KeyField { field, transforms: vec![] }
+    }
+
     #[test]
     fn test_extract_throttle_key_multiple_fields() {
         let data = test_request(); // ip=10.0.1.50, path=/api/v2/users
         let ctx = test_ctx(&data);
         let key = extract_throttle_key(
-            &[Field::IpSrc, Field::Path],
+            &[kf(Field::IpSrc), kf(Field::Path)],
             &data,
             &ctx,
         );
@@ -1213,7 +1256,7 @@ mod tests {
         let data = test_request(); // content_length=0
         let ctx = test_ctx(&data);
         let key = extract_throttle_key(
-            &[Field::IpSrc, Field::ContentLength],
+            &[kf(Field::IpSrc), kf(Field::ContentLength)],
             &data,
             &ctx,
         );
@@ -1226,11 +1269,51 @@ mod tests {
         data.user_agent = None;
         let ctx = test_ctx(&data);
         let key = extract_throttle_key(
-            &[Field::IpSrc, Field::UserAgent],
+            &[kf(Field::IpSrc), kf(Field::UserAgent)],
             &data,
             &ctx,
         );
         assert_eq!(key, None);
+    }
+
+    #[test]
+    fn test_extract_throttle_key_with_sha256_transform() {
+        let data = test_request(); // path="/api/v2/users"
+        let ctx = test_ctx(&data);
+        let key = extract_throttle_key(
+            &[
+                kf(Field::IpSrc),
+                KeyField {
+                    field: Field::Path,
+                    transforms: vec![Transform::Sha256],
+                },
+            ],
+            &data,
+            &ctx,
+        );
+        let expected_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest("/api/v2/users".as_bytes())
+        );
+        assert_eq!(key, Some(format!("10.0.1.50:{}", expected_hash)));
+    }
+
+    #[test]
+    fn test_extract_throttle_key_sha256_on_empty_string() {
+        // Empty query_string with sha256 produces a valid hash (not None)
+        let mut data = test_request();
+        data.query_string = String::new();
+        let ctx = test_ctx(&data);
+        let key = extract_throttle_key(
+            &[KeyField {
+                field: Field::QueryString,
+                transforms: vec![Transform::Sha256],
+            }],
+            &data,
+            &ctx,
+        );
+        let expected_hash = format!("{:x}", sha2::Sha256::digest("".as_bytes()));
+        assert_eq!(key, Some(expected_hash));
     }
 
     // --- Number-to-string comparison tests ---

@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require "ipaddr"
 require "json"
 require "openssl"
@@ -29,7 +30,7 @@ module Rack
 
         def extract_throttle_key(key_fields, request, jwt_config: nil)
           ctx = EvalContext.new(request, jwt_config)
-          parts = key_fields.map { |field| ctx.extract_field(field) }
+          parts = key_fields.map { |entry| ctx.extract_key_field(entry) }
           return nil if parts.any?(&:nil?)
 
           parts.join(":")
@@ -90,6 +91,25 @@ module Rack
             extract_http_field(name)
           when /\Ajwt\./
             extract_jwt_field(name)
+          else
+            nil
+          end
+        end
+
+        def extract_key_field(entry)
+          case entry
+          when String
+            extract_field(entry)
+          when Hash
+            field_name = entry["field"] || entry[:field]
+            value = extract_field(field_name)
+            return nil if value.nil?
+
+            transforms = entry["transform"] || entry[:transform]
+            if transforms
+              value = apply_transforms(value, transforms)
+            end
+            value
           else
             nil
           end
@@ -210,6 +230,8 @@ module Rack
                       URI.decode_www_form_component(value)
                     when "length"
                       value.length.to_s
+                    when "sha256"
+                      Digest::SHA256.hexdigest(value)
                     else
                       value
                     end

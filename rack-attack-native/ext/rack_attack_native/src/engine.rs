@@ -119,6 +119,7 @@ fn estimate_transform_cost(transform: &Transform) -> u32 {
         Transform::Length => 1,
         Transform::Lower | Transform::Upper => 3,
         Transform::UrlDecode => 5,
+        Transform::Sha256 => 10,
     }
 }
 
@@ -190,8 +191,8 @@ impl RuleSet {
         for rule in all_rules {
             collect_field_categories(&rule.condition, &mut required_categories);
             // Also check throttle key fields
-            for key_field in &rule.key_fields {
-                collect_field_category(key_field, &mut required_categories);
+            for kf in &rule.key_fields {
+                collect_field_category(&kf.field, &mut required_categories);
             }
         }
 

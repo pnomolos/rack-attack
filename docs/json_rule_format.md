@@ -213,7 +213,7 @@ Every rule is a JSON object with at least `name`, `type`, and `condition` fields
 | `condition` | object or null | yes (unless `enabled: false`) | The condition tree to evaluate (see [Conditions](#conditions)). `null` means "always match". |
 | `limit` | integer | throttle only | Maximum number of requests allowed in the period. |
 | `period` | integer | throttle only | Time window in seconds. |
-| `key` | array of strings | throttle only | Field names used to build the throttle discriminator (see [Fields](#fields)). Defaults to `["ip.src"]`. |
+| `key` | array | throttle only | Field names (strings) or objects with `"field"` and `"transform"` used to build the throttle discriminator. Defaults to `["ip.src"]`. |
 | `enabled` | boolean | no | Set to `false` to disable a rule without removing it. Defaults to `true`. |
 | `description` | string | no | Human-readable description for documentation purposes. Not used during evaluation. |
 
@@ -269,6 +269,19 @@ Throttles rate-limit requests by counting them against a cache key built from th
 ```
 
 The `key` array determines the discriminator. Multiple fields are joined with `:`. For example, `["ip.src", "http.request.headers[\"x-api-key\"]"]` produces a key like `"1.2.3.4:my-api-key"`.
+
+Key entries can also be objects with a `"field"` and optional `"transform"` to apply transforms before building the key. This is useful for hashing sensitive values:
+
+```json
+{
+  "key": [
+    "ip.src",
+    {"field": "http.request.uri.path", "transform": "sha256"}
+  ]
+}
+```
+
+This produces a key like `"1.2.3.4:e3b0c44..."` where the path is SHA-256 hashed. Plain strings and objects can be mixed in the same array. The `"transform"` property accepts the same formats as in [leaf conditions](#leaf-conditions) — a single string (`"sha256"`) or an array of strings (`["url_decode", "sha256"]`) applied left to right.
 
 If any key field is absent from the request, the throttle does not match (similar to returning `nil` from a block-based throttle).
 
@@ -568,6 +581,9 @@ Transforms modify the extracted field value before the operator is applied. Spec
 | `upper` | Convert to uppercase | `"hello"` -> `"HELLO"` |
 | `url_decode` | Percent-decode (`%20` -> space, etc.) | `"hello%20world"` -> `"hello world"` |
 | `length` | Replace value with its character length (as a string) | `"hello"` -> `"5"` |
+| `sha256` | SHA-256 hex digest (lowercase, 64 chars) | `"secret"` -> `"2bb80d..."` |
+
+> **Note:** `sha256` always produces a non-empty 64-character string, even when applied to an empty field value. In throttle keys, this means a field that would normally cause the throttle to skip (because it's empty) will instead produce a valid discriminator when `sha256` is applied. This only affects fields that are present but empty (e.g., `http.request.uri.query` with no query string); truly absent fields (e.g., missing `http.user_agent`) still cause the throttle to skip.
 
 Single transform:
 

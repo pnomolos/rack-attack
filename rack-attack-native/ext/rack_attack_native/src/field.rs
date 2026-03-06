@@ -2,6 +2,7 @@ use crate::body::BodyData;
 use crate::jwt::JwtData;
 use crate::query::{decode_www_form_component, QueryData};
 use crate::request_data::RequestData;
+use sha2::Digest;
 use std::borrow::Cow;
 use std::cell::OnceCell;
 
@@ -12,6 +13,7 @@ pub enum Transform {
     Upper,
     UrlDecode,
     Length,
+    Sha256,
 }
 
 impl Transform {
@@ -21,6 +23,7 @@ impl Transform {
             "upper" => Ok(Transform::Upper),
             "url_decode" => Ok(Transform::UrlDecode),
             "length" => Ok(Transform::Length),
+            "sha256" => Ok(Transform::Sha256),
             _ => Err(format!("Unknown transform: {}", s)),
         }
     }
@@ -309,6 +312,25 @@ fn apply_one_transform<'a>(val: FieldValue<'a>, transform: &Transform) -> FieldV
             }
             other => other,
         },
+        Transform::Sha256 => {
+            let input = match &val {
+                FieldValue::Str(cow) => Some(cow.as_ref()),
+                FieldValue::OptStr(Some(cow)) => Some(cow.as_ref()),
+                FieldValue::OptStr(None) => None,
+                FieldValue::Number(n) => {
+                    let s = n.to_string();
+                    let hash = format!("{:x}", sha2::Sha256::digest(s.as_bytes()));
+                    return FieldValue::Str(Cow::Owned(hash));
+                }
+            };
+            match input {
+                Some(s) => {
+                    let hash = format!("{:x}", sha2::Sha256::digest(s.as_bytes()));
+                    FieldValue::Str(Cow::Owned(hash))
+                }
+                None => val,
+            }
+        }
     }
 }
 
@@ -467,6 +489,70 @@ mod tests {
         let val = FieldValue::Str(Cow::Borrowed("UNION%20SELECT"));
         let result = apply_transforms(val, &[Transform::UrlDecode, Transform::Lower]);
         assert_eq!(result.as_str(), Some("union select"));
+    }
+
+    #[test]
+    fn test_transform_sha256_basic() {
+        let val = FieldValue::Str(Cow::Borrowed("hello"));
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(
+            result.as_str(),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+    }
+
+    #[test]
+    fn test_transform_sha256_empty_string() {
+        let val = FieldValue::Str(Cow::Borrowed(""));
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(
+            result.as_str(),
+            Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+    }
+
+    #[test]
+    fn test_transform_sha256_opt_str_some() {
+        let val = FieldValue::OptStr(Some(Cow::Borrowed("hello")));
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(
+            result.as_str(),
+            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+        );
+    }
+
+    #[test]
+    fn test_transform_sha256_opt_str_none() {
+        let val = FieldValue::OptStr(None);
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(result.as_str(), None);
+    }
+
+    #[test]
+    fn test_transform_sha256_number() {
+        // Number(42) → stringify to "42" → sha256("42")
+        let val = FieldValue::Number(42);
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(
+            result.as_str(),
+            Some("73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049")
+        );
+    }
+
+    #[test]
+    fn test_transform_sha256_multibyte_utf8() {
+        let val = FieldValue::Str(Cow::Borrowed("café"));
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        // SHA-256 of UTF-8 bytes of "café" (c3 a9 for é)
+        let expected = format!("{:x}", sha2::Sha256::digest("café".as_bytes()));
+        assert_eq!(result.as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_transform_sha256_produces_64_chars() {
+        let val = FieldValue::Str(Cow::Borrowed("anything"));
+        let result = apply_transforms(val, &[Transform::Sha256]);
+        assert_eq!(result.as_str().unwrap().len(), 64);
     }
 
     #[test]

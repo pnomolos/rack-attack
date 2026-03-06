@@ -69,9 +69,9 @@
         },
         "key": {
           "type": "array",
-          "items": { "$ref": "#/$defs/field_name" },
+          "items": { "$ref": "#/$defs/key_field" },
           "minItems": 1,
-          "description": "Field names used to build the throttle discriminator key. Defaults to [\"ip.src\"]."
+          "description": "Field names (or objects with field+transform) used to build the throttle discriminator key. Defaults to [\"ip.src\"]."
         }
       },
       "required": ["name", "type"],
@@ -296,13 +296,13 @@
       "oneOf": [
         {
           "type": "string",
-          "enum": ["lower", "upper", "url_decode", "length"]
+          "enum": ["lower", "upper", "url_decode", "length", "sha256"]
         },
         {
           "type": "array",
           "items": {
             "type": "string",
-            "enum": ["lower", "upper", "url_decode", "length"]
+            "enum": ["lower", "upper", "url_decode", "length", "sha256"]
           },
           "minItems": 1
         }
@@ -312,6 +312,27 @@
     "field_name": {
       "type": "string",
       "pattern": "^(ip\\.src|http\\.request\\.(uri\\.path(\\.extension)?|method|uri\\.query|uri|body\\.(size|raw))|http\\.(user_agent|host)|jwt\\.valid|http\\.request\\.(headers|cookies|uri\\.args)\\[\"[^\"]+\"\\]|http\\.request\\.body\\.json\\[\"[^\"]+\"\\]|jwt\\.(payload|header|verified_payload)\\[\"[^\"]+\"\\])$"
+    },
+
+    "key_field": {
+      "oneOf": [
+        { "$ref": "#/$defs/field_name" },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "$ref": "#/$defs/field_name",
+              "description": "Request field to extract for the throttle key."
+            },
+            "transform": {
+              "$ref": "#/$defs/transform",
+              "description": "Transform(s) to apply to the field value before using as key."
+            }
+          },
+          "required": ["field"],
+          "additionalProperties": false
+        }
+      ]
     },
 
     "jwt_key": {

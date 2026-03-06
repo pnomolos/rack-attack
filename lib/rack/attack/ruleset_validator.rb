@@ -11,7 +11,7 @@ module Rack
         gt lt gte lte in_ip_range not_in_ip_range exists not_exists
       ].freeze
 
-      VALID_TRANSFORMS = %w[lower upper url_decode length].freeze
+      VALID_TRANSFORMS = %w[lower upper url_decode length sha256].freeze
       VALID_RULE_ORDERS = %w[cost insertion].freeze
       VALID_JWT_ALGORITHMS = %w[HS256 HS384 HS512 RS256 RS384 RS512 ES256 ES384 PS256 PS384 PS512].freeze
 
@@ -169,10 +169,8 @@ module Rack
 
           # Validate throttle key field names
           if key_fields.is_a?(Array)
-            key_fields.each do |field|
-              unless valid_field?(field.to_s)
-                @errors << "#{prefix}: invalid key field \"#{field}\""
-              end
+            key_fields.each do |entry|
+              validate_key_field_entry(entry, prefix)
             end
           end
         end
@@ -297,6 +295,37 @@ module Rack
               @errors << "#{prefix}: invalid transform \"#{transform}\", must be one of: #{VALID_TRANSFORMS.join(", ")}"
             end
           end
+        end
+      end
+
+      VALID_KEY_FIELD_KEYS = %w[field transform].freeze
+
+      def validate_key_field_entry(entry, prefix)
+        case entry
+        when String
+          unless valid_field?(entry)
+            @errors << "#{prefix}: invalid key field \"#{entry}\""
+          end
+        when Hash
+          unknown_keys = entry.keys.map(&:to_s) - VALID_KEY_FIELD_KEYS
+          unknown_keys.each do |key|
+            @errors << "#{prefix}: unknown key field property \"#{key}\""
+          end
+          field = entry["field"]
+          unless field.is_a?(String) && valid_field?(field)
+            @errors << "#{prefix}: invalid key field \"#{field}\""
+          end
+          if entry.key?("transform")
+            transforms = entry["transform"]
+            transforms = [transforms] unless transforms.is_a?(Array)
+            transforms.each do |transform|
+              unless VALID_TRANSFORMS.include?(transform)
+                @errors << "#{prefix}: invalid key field transform \"#{transform}\", must be one of: #{VALID_TRANSFORMS.join(", ")}"
+              end
+            end
+          end
+        else
+          @errors << "#{prefix}: key entry must be a string or object"
         end
       end
 

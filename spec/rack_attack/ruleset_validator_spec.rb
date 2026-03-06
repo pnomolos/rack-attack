@@ -336,6 +336,114 @@ describe "Rack::Attack.validate_ruleset" do
     end
   end
 
+  describe "throttle key field validation" do
+    def throttle_rule_with_key(key)
+      {
+        "rules" => [
+          {
+            "name" => "test-throttle",
+            "type" => "throttle",
+            "limit" => 100,
+            "period" => 60,
+            "key" => key,
+            "condition" => { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/" }
+          }
+        ]
+      }
+    end
+
+    it "accepts string key entries" do
+      result = Rack::Attack.validate_ruleset(throttle_rule_with_key(["ip.src"]))
+      _(result.valid?).must_equal true
+    end
+
+    it "accepts object key entries with field and transform" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "http.request.uri.path", "transform" => "sha256" }])
+      )
+      _(result.valid?).must_equal true
+    end
+
+    it "accepts mixed string and object key entries" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key(["ip.src", { "field" => "http.request.uri.path", "transform" => "sha256" }])
+      )
+      _(result.valid?).must_equal true
+    end
+
+    it "accepts object key entries without transform" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "ip.src" }])
+      )
+      _(result.valid?).must_equal true
+    end
+
+    it "accepts object key entries with array transform" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "http.request.uri.path", "transform" => ["url_decode", "sha256"] }])
+      )
+      _(result.valid?).must_equal true
+    end
+
+    it "rejects object key entries with invalid field" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "bad.field" }])
+      )
+      _(result.valid?).must_equal false
+      _(result.errors.any? { |e| e.include?("bad.field") }).must_equal true
+    end
+
+    it "rejects object key entries with non-string field" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => 123 }])
+      )
+      _(result.valid?).must_equal false
+      _(result.errors.any? { |e| e.include?("key field") }).must_equal true
+    end
+
+    it "rejects object key entries with invalid transform" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "ip.src", "transform" => "rot13" }])
+      )
+      _(result.valid?).must_equal false
+      _(result.errors.any? { |e| e.include?("rot13") }).must_equal true
+    end
+
+    it "rejects non-string non-hash key entries" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([123])
+      )
+      _(result.valid?).must_equal false
+      _(result.errors.any? { |e| e.include?("key entry") }).must_equal true
+    end
+
+    it "rejects object key entries with unknown extra keys" do
+      result = Rack::Attack.validate_ruleset(
+        throttle_rule_with_key([{ "field" => "ip.src", "typo_key" => "value" }])
+      )
+      _(result.valid?).must_equal false
+      _(result.errors.any? { |e| e.include?("typo_key") }).must_equal true
+    end
+
+    it "accepts sha256 transform in conditions" do
+      result = Rack::Attack.validate_ruleset({
+        "rules" => [
+          {
+            "name" => "sha256-block",
+            "type" => "blocklist",
+            "condition" => {
+              "field" => "http.request.uri.path",
+              "operator" => "eq",
+              "value" => "somehash",
+              "transform" => "sha256"
+            }
+          }
+        ]
+      })
+      _(result.valid?).must_equal true
+    end
+  end
+
   describe "jwt_keys validation" do
     it "validates valid jwt_keys" do
       result = Rack::Attack.validate_ruleset({

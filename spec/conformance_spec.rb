@@ -1497,4 +1497,274 @@ class ConformanceSpec < Minitest::Test
     cond = { "field" => "http.host", "operator" => "contains", "value" => "example" }
     assert_conformance(cond, { host: "api.example.com" }, true, "host contains")
   end
+
+  # ===========================================================================
+  # sha256 transform conformance
+  # ===========================================================================
+
+  def test_sha256_transform_in_condition
+    # SHA-256 of "hello" is well-known
+    expected_hash = Digest::SHA256.hexdigest("hello")
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, { path: "hello" }, true, "sha256 transform match")
+  end
+
+  def test_sha256_transform_no_match
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => "wrong_hash",
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, { path: "hello" }, false, "sha256 transform no match")
+  end
+
+  def test_sha256_on_missing_field
+    cond = {
+      "field" => "http.user_agent",
+      "operator" => "eq",
+      "value" => "anything",
+      "transform" => "sha256",
+    }
+    # Missing field → nil → returns false before transforms
+    assert_conformance(cond, {}, false, "sha256 on missing field returns false")
+  end
+
+  def test_sha256_chained_with_lower
+    # sha256 already produces lowercase hex, but chaining lower should be no-op
+    expected_hash = Digest::SHA256.hexdigest("/api/secret")
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => ["sha256", "lower"],
+    }
+    assert_conformance(cond, { path: "/api/secret" }, true, "sha256 then lower is idempotent")
+  end
+
+  def test_sha256_produces_64_char_hex
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => 64,
+      "transform" => ["sha256", "length"],
+    }
+    assert_conformance(cond, { path: "anything" }, true, "sha256 produces 64-char hex string")
+  end
+
+  # ===========================================================================
+  # Throttle key with transforms conformance
+  # ===========================================================================
+
+  def test_throttle_key_with_sha256_transform
+    # Key field with sha256 transform should hash the value
+    expected_hash = Digest::SHA256.hexdigest("/calendars/user123")
+    cond = { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/calendars/" }
+
+    # Ruby side
+    env = build_rack_env({ path: "/calendars/user123", ip: "1.2.3.4" })
+    request = Rack::Request.new(env)
+    ruby_key = Rack::Attack::ConditionEvaluator.extract_throttle_key(
+      ["ip.src", { "field" => "http.request.uri.path", "transform" => "sha256" }],
+      request
+    )
+    assert_equal "1.2.3.4:#{expected_hash}", ruby_key, "Ruby throttle key with sha256"
+
+    # Native side
+    rule = {
+      "name" => "ical-throttle",
+      "type" => "throttle",
+      "condition" => cond,
+      "key" => ["ip.src", { "field" => "http.request.uri.path", "transform" => "sha256" }],
+      "limit" => 10,
+      "period" => 60,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/calendars/user123", ip: "1.2.3.4" })
+    result = rs.evaluate(native_data)
+
+    assert_equal 1, result[:throttle_matches].size, "Native: one throttle match"
+    assert_equal "1.2.3.4:#{expected_hash}", result[:throttle_matches][0][:discriminator],
+                 "Native throttle key with sha256"
+  end
+
+  def test_throttle_key_mixed_string_and_object
+    # Mix plain string and object key entries
+    cond = { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/" }
+    key_fields = ["ip.src", { "field" => "http.request.method" }]
+
+    # Ruby side
+    env = build_rack_env({ path: "/api", ip: "1.2.3.4", method: "POST" })
+    request = Rack::Request.new(env)
+    ruby_key = Rack::Attack::ConditionEvaluator.extract_throttle_key(key_fields, request)
+    assert_equal "1.2.3.4:POST", ruby_key, "Ruby: mixed key entries"
+
+    # Native side
+    rule = {
+      "name" => "mixed-key",
+      "type" => "throttle",
+      "condition" => cond,
+      "key" => key_fields,
+      "limit" => 100,
+      "period" => 60,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/api", ip: "1.2.3.4", method: "POST" })
+    result = rs.evaluate(native_data)
+
+    assert_equal 1, result[:throttle_matches].size
+    assert_equal "1.2.3.4:POST", result[:throttle_matches][0][:discriminator],
+                 "Native: mixed key entries"
+
+    # Cross-check
+    assert_equal ruby_key, result[:throttle_matches][0][:discriminator],
+                 "Ruby and Native agree on mixed key entries"
+  end
+
+  def test_throttle_key_object_without_transform
+    # Object key entry without transform should behave like plain string
+    cond = { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/" }
+
+    # Ruby side
+    env = build_rack_env({ path: "/test", ip: "5.6.7.8" })
+    request = Rack::Request.new(env)
+    ruby_key = Rack::Attack::ConditionEvaluator.extract_throttle_key(
+      [{ "field" => "ip.src" }],
+      request
+    )
+    assert_equal "5.6.7.8", ruby_key, "Ruby: object key without transform"
+
+    # Native side
+    rule = {
+      "name" => "obj-key",
+      "type" => "throttle",
+      "condition" => cond,
+      "key" => [{ "field" => "ip.src" }],
+      "limit" => 100,
+      "period" => 60,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: "/test", ip: "5.6.7.8" })
+    result = rs.evaluate(native_data)
+
+    assert_equal "5.6.7.8", result[:throttle_matches][0][:discriminator],
+                 "Native: object key without transform"
+  end
+
+  # ===========================================================================
+  # sha256 edge cases
+  # ===========================================================================
+
+  def test_sha256_empty_query_string
+    # query_string is always present (Str, not OptStr), so "" gets hashed.
+    # But exists check happens before transforms: "" is empty → returns false for exists.
+    # For eq with transform, the field value "" is NOT nil, so transforms are applied.
+    expected_hash = Digest::SHA256.hexdigest("")
+    cond = {
+      "field" => "http.request.uri.query",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, { query_string: "" }, true,
+                       "sha256 on empty query_string: value is '' which gets hashed")
+  end
+
+  def test_sha256_on_missing_optional_field
+    # user_agent is truly nil when absent → returns false before transforms
+    cond = {
+      "field" => "http.user_agent",
+      "operator" => "eq",
+      "value" => Digest::SHA256.hexdigest(""),
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, {}, false,
+                       "sha256 on nil field returns false (not hashed)")
+  end
+
+  def test_sha256_on_path_with_content
+    # Path always has content (never nil/empty for valid requests)
+    expected_hash = Digest::SHA256.hexdigest("/")
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, { path: "/" }, true, "sha256 on root path")
+  end
+
+  def test_sha256_multibyte_utf8
+    # Multibyte UTF-8: both engines should hash the same bytes
+    path = "/api/users/caf\u00e9"
+    expected_hash = Digest::SHA256.hexdigest(path)
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => "sha256",
+    }
+    assert_conformance(cond, { path: path }, true, "sha256 on multibyte UTF-8 path")
+  end
+
+  def test_sha256_after_length_transform
+    # Chaining: length → sha256. Length produces a string like "13", then sha256 hashes it.
+    path = "/api/v2/users" # length = 13
+    expected_hash = Digest::SHA256.hexdigest("13")
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "eq",
+      "value" => expected_hash,
+      "transform" => ["length", "sha256"],
+    }
+    assert_conformance(cond, { path: path }, true, "length then sha256")
+  end
+
+  def test_throttle_key_chained_transforms
+    # Key field with chained transforms: url_decode then sha256
+    path = "/calendars/user%2F123"
+    decoded_path = URI.decode_www_form_component(path)
+    expected_hash = Digest::SHA256.hexdigest(decoded_path)
+
+    cond = { "field" => "http.request.uri.path", "operator" => "starts_with", "value" => "/" }
+
+    # Ruby side
+    env = build_rack_env({ path: path, ip: "1.2.3.4" })
+    request = Rack::Request.new(env)
+    ruby_key = Rack::Attack::ConditionEvaluator.extract_throttle_key(
+      [{ "field" => "http.request.uri.path", "transform" => ["url_decode", "sha256"] }],
+      request
+    )
+    assert_equal expected_hash, ruby_key, "Ruby: chained transforms in key field"
+
+    # Native side
+    rule = {
+      "name" => "chain-key",
+      "type" => "throttle",
+      "condition" => cond,
+      "key" => [{ "field" => "http.request.uri.path", "transform" => ["url_decode", "sha256"] }],
+      "limit" => 10,
+      "period" => 60,
+    }
+    json = JSON.generate({ "rules" => [rule] })
+    rs = RackAttackNative::RuleSet.from_json(json)
+    native_data = build_native_data({ path: path, ip: "1.2.3.4" })
+    result = rs.evaluate(native_data)
+
+    assert_equal 1, result[:throttle_matches].size
+    assert_equal expected_hash, result[:throttle_matches][0][:discriminator],
+                 "Native: chained transforms in key field"
+
+    # Cross-check
+    assert_equal ruby_key, result[:throttle_matches][0][:discriminator],
+                 "Ruby and Native agree on chained key transforms"
+  end
 end
