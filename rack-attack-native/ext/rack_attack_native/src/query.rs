@@ -42,8 +42,9 @@ impl<'a> QueryData<'a> {
     }
 }
 
-/// Decode a www-form-urlencoded component: percent-decode and replace '+' with space.
-fn decode_www_form_component(s: &str) -> String {
+/// Decode a www-form-urlencoded component: replace '+' with space, then percent-decode.
+/// Matches Ruby's URI.decode_www_form_component behavior.
+pub(crate) fn decode_www_form_component(s: &str) -> String {
     let plus_replaced = s.replace('+', " ");
     percent_decode_str(&plus_replaced)
         .decode_utf8_lossy()

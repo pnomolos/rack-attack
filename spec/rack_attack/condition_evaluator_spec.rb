@@ -1,11 +1,15 @@
 # frozen_string_literal: true
 
 require_relative "../spec_helper"
-require "base64"
 require "json"
 require "stringio"
 
 describe Rack::Attack::ConditionEvaluator do
+  # URL-safe Base64 encode without the base64 gem (removed in Ruby 4.0)
+  def urlsafe_encode64_no_pad(str)
+    [str].pack("m0").tr("+/", "-_").delete("=")
+  end
+
   def make_request(env = {})
     defaults = {
       "REQUEST_METHOD" => "GET",
@@ -126,8 +130,8 @@ describe Rack::Attack::ConditionEvaluator do
 
     describe "JWT fields" do
       def make_jwt(payload, header = { "alg" => "none", "typ" => "JWT" })
-        header_b64 = Base64.urlsafe_encode64(JSON.generate(header), padding: false)
-        payload_b64 = Base64.urlsafe_encode64(JSON.generate(payload), padding: false)
+        header_b64 = urlsafe_encode64_no_pad(JSON.generate(header))
+        payload_b64 = urlsafe_encode64_no_pad(JSON.generate(payload))
         "#{header_b64}.#{payload_b64}.fake_signature"
       end
 

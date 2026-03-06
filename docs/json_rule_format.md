@@ -12,7 +12,7 @@ Rack::Attack supports defining rules in a declarative JSON format, inspired by [
 - [JSON Schema](#json-schema)
 - [Quick Start](#quick-start)
 - [Loading Rules](#loading-rules)
-  - [`load_ruleset(source, replace:, jwt_keys:)`](#load_rulesetsource-replace-jwt_keys)
+  - [`load_ruleset(source, replace:, jwt_keys:, validate:)`](#load_rulesetsource-replace-jwt_keys-validate)
   - [Input Formats](#input-formats)
   - [Multiple Loads](#multiple-loads)
   - [Replacing Rules](#replacing-rules)

@@ -18,7 +18,6 @@ require "rack"
 require "rack/attack/condition_evaluator"
 require "json"
 require "stringio"
-require "base64"
 require "rack_attack_native"
 
 class FieldEquivalenceSpec < Minitest::Test

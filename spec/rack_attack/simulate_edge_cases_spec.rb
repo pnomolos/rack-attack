@@ -3,9 +3,13 @@
 require_relative "test_helper"
 require "json"
 require "stringio"
-require "base64"
 
 describe "simulate edge cases" do
+  # URL-safe Base64 encode without the base64 gem (removed in Ruby 4.0)
+  def urlsafe_encode64_no_pad(str)
+    [str].pack("m0").tr("+/", "-_").delete("=")
+  end
+
   before do
     Rack::Attack.clear_configuration
     Rack::Attack.cache.store = ActiveSupport::Cache::MemoryStore.new
@@ -181,7 +185,7 @@ describe "simulate edge cases" do
 
   describe "JWT fields via headers in simulation" do
     def encode_jwt_segment(data)
-      Base64.urlsafe_encode64(JSON.generate(data), padding: false)
+      urlsafe_encode64_no_pad(JSON.generate(data))
     end
 
     it "JWT payload accessible via headers parameter" do
