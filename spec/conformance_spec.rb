@@ -896,6 +896,18 @@ class ConformanceSpec < Minitest::Test
     assert_conformance(cond, { path: "/assets/APP.JS" }, false, "wildcard is case-sensitive")
   end
 
+  def test_wildcard_single_star_does_not_cross_slash
+    # * should NOT match across path separators (FNM_PATHNAME behavior)
+    cond = { "field" => "http.request.uri.path", "operator" => "wildcard", "value" => "/api/*/users" }
+    assert_conformance(cond, { path: "/api/v1/v2/users" }, false, "single * does not cross /")
+  end
+
+  def test_wildcard_double_star_crosses_slash
+    # ** matches across path separators in both Ruby File.fnmatch and glob_match
+    cond = { "field" => "http.request.uri.path", "operator" => "wildcard", "value" => "/api/**/users" }
+    assert_conformance(cond, { path: "/api/v1/v2/users" }, true, "** crosses /")
+  end
+
   # ===========================================================================
   # Body-related fields conformance
   # ===========================================================================

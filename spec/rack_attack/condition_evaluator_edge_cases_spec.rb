@@ -342,4 +342,51 @@ describe "ConditionEvaluator edge cases" do
       _(key).must_be_nil
     end
   end
+
+  # --- Body JSON memoization ---
+
+  describe "parse_body_json memoization" do
+    it "does not re-parse invalid JSON on repeated field access within same condition" do
+      call_count = 0
+      body = Object.new
+      body.define_singleton_method(:read) { |*| call_count += 1; "{invalid json" }
+      body.define_singleton_method(:rewind) { }
+
+      req = build_request("rack.input" => body, "CONTENT_LENGTH" => "14")
+
+      # An 'and' condition accessing two body.json fields — body should only be read once
+      cond = {
+        "and" => [
+          { "field" => 'http.request.body.json["a"]', "operator" => "exists" },
+          { "field" => 'http.request.body.json["b"]', "operator" => "exists" }
+        ]
+      }
+      _(match?(cond, req)).must_equal false
+      _(call_count).must_equal 1
+    end
+  end
+
+  # --- Non-rewindable body ---
+
+  describe "non-rewindable body" do
+    it "reads body without crashing when body does not support rewind" do
+      body = Object.new
+      body.define_singleton_method(:read) { |*| '{"key":"value"}' }
+      # Intentionally no rewind method
+
+      req = build_request("rack.input" => body, "CONTENT_LENGTH" => "15")
+      cond = { "field" => 'http.request.body.json["key"]', "operator" => "eq", "value" => "value" }
+      _(match?(cond, req)).must_equal true
+    end
+
+    it "reads raw body without crashing when body does not support rewind" do
+      body = Object.new
+      body.define_singleton_method(:read) { |*| "hello world" }
+      # Intentionally no rewind method
+
+      req = build_request("rack.input" => body, "CONTENT_LENGTH" => "11")
+      cond = { "field" => "http.request.body.raw", "operator" => "contains", "value" => "hello" }
+      _(match?(cond, req)).must_equal true
+    end
+  end
 end

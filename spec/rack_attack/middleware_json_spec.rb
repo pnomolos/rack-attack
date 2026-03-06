@@ -223,6 +223,32 @@ describe "Middleware integration with JSON rules" do
     end
   end
 
+  # --- Throttle discriminator normalizer ---
+
+  describe "throttle discriminator normalizer" do
+    it "normalizes discriminator so mixed-case IPs share the same counter" do
+      # The default normalizer does .to_s.strip.downcase
+      # JSON throttle keys come from the native or Ruby evaluator as raw strings.
+      # This test ensures the normalizer is applied in the JSON throttle path.
+      Rack::Attack.load_ruleset({
+        "rules" => [{
+          "name" => "norm-test",
+          "type" => "throttle",
+          "limit" => 2,
+          "period" => 60,
+          "key" => ["http.request.headers[\"x-custom-id\"]"],
+          "condition" => { "field" => "http.request.headers[\"x-custom-id\"]", "operator" => "exists" }
+        }]
+      })
+
+      # With normalizer (default): "ABC" and "abc" should share the same counter
+      get "/", {}, "REMOTE_ADDR" => "1.2.3.4", "HTTP_X_CUSTOM_ID" => "ABC"
+      get "/", {}, "REMOTE_ADDR" => "1.2.3.4", "HTTP_X_CUSTOM_ID" => "abc"
+      get "/", {}, "REMOTE_ADDR" => "1.2.3.4", "HTTP_X_CUSTOM_ID" => "Abc"
+      _(last_response.status).must_equal 429
+    end
+  end
+
   # --- Edge cases ---
 
   describe "middleware edge cases" do

@@ -556,7 +556,7 @@ These operators do not use the `value` property:
 
 **`matches`** uses Ruby's `Regexp` (or Rust's `regex` crate in the native engine). Patterns are not anchored by default; use `^` and `$` for full-string matching.
 
-**`wildcard`** uses `File.fnmatch` with `FNM_PATHNAME` (or `glob-match` in the native engine). The `*` character matches any characters within a single path segment.
+**`wildcard`** uses `File.fnmatch` with `FNM_PATHNAME` (or `glob-match` in the native engine). The `*` character matches any characters within a single path segment (it does not cross `/` boundaries). Use `**` to match across path segments — for example, `/api/**/users` matches both `/api/v1/users` and `/api/v1/v2/users`.
 
 ## Transforms
 
