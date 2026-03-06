@@ -1408,4 +1408,73 @@ class ConformanceSpec < Minitest::Test
     error = assert_raises(ArgumentError) { RackAttackNative::RuleSet.from_json(json) }
     assert_match(/Invalid rule_order/, error.message)
   end
+
+  # ===========================================================================
+  # url_decode transform with + (plus as space)
+  # ===========================================================================
+
+  def test_url_decode_plus_as_space
+    cond = {
+      "field" => "http.request.uri.query",
+      "operator" => "contains",
+      "value" => "union select",
+      "transform" => ["url_decode", "lower"],
+    }
+    assert_conformance(cond, { query_string: "q=UNION+SELECT+*" }, true, "url_decode + as space")
+  end
+
+  def test_url_decode_plus_literal_in_path
+    cond = {
+      "field" => "http.request.uri.path",
+      "operator" => "contains",
+      "value" => "hello world",
+      "transform" => "url_decode",
+    }
+    assert_conformance(cond, { path: "/hello+world" }, true, "url_decode + in path")
+  end
+
+  def test_url_decode_mixed_plus_and_percent
+    cond = {
+      "field" => "http.request.uri.query",
+      "operator" => "contains",
+      "value" => "a b+c",
+      "transform" => "url_decode",
+    }
+    assert_conformance(cond, { query_string: "q=a+b%2Bc" }, true, "url_decode mixed + and %2B")
+  end
+
+  # ===========================================================================
+  # length transform on nil/missing field
+  # ===========================================================================
+
+  def test_length_transform_on_missing_field
+    cond = { "field" => "http.user_agent", "operator" => "eq", "value" => 0, "transform" => "length" }
+    # No user agent set → field is nil → Ruby returns false before transforms
+    assert_conformance(cond, {}, false, "length on missing field returns false")
+  end
+
+  def test_length_transform_on_present_field
+    cond = { "field" => "http.user_agent", "operator" => "eq", "value" => 7, "transform" => "length" }
+    assert_conformance(cond, { user_agent: "Mozilla" }, true, "length on present field")
+  end
+
+  # ===========================================================================
+  # ne with numeric value against non-numeric string
+  # ===========================================================================
+
+  def test_ne_numeric_vs_non_numeric_string
+    cond = { "field" => "http.user_agent", "operator" => "ne", "value" => 42 }
+    # Both Ruby and Rust return false here: non-numeric string can't do numeric compare
+    assert_conformance(cond, { user_agent: "Mozilla/5.0" }, false, "ne numeric vs non-numeric string")
+  end
+
+  def test_ne_numeric_vs_numeric_string
+    cond = { "field" => "http.user_agent", "operator" => "ne", "value" => 42 }
+    assert_conformance(cond, { user_agent: "99" }, true, "ne numeric vs numeric string")
+  end
+
+  def test_eq_numeric_vs_non_numeric_string
+    cond = { "field" => "http.user_agent", "operator" => "eq", "value" => 42 }
+    assert_conformance(cond, { user_agent: "Mozilla/5.0" }, false, "eq numeric vs non-numeric string")
+  end
 end

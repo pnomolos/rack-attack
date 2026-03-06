@@ -44,7 +44,6 @@ impl JwtConfig {
             validation.validate_exp = true;
             validation.validate_aud = false;
             validation.required_spec_claims = std::collections::HashSet::new();
-            validation.required_spec_claims.insert("exp".to_string());
             keys.push(JwtKeyEntry {
                 algorithm,
                 decoding_key,

@@ -405,6 +405,13 @@ fn eval_leaf(
         _ => {}
     }
 
+    // Return false for missing optional fields before transforms (matches Ruby:
+    // `return false if field_val.nil?`). This ensures Length on None returns false,
+    // not Number(0).
+    if matches!(raw_val, FieldValue::OptStr(None)) {
+        return false;
+    }
+
     // Fast path: [lower/upper..., length] on ASCII → skip string transforms
     if let Some(Transform::Length) = transforms.last() {
         if matches!(compiled, CompiledValue::Number(_)) {
@@ -421,7 +428,7 @@ fn eval_leaf(
                     let len = match &raw_val {
                         FieldValue::Str(cow) => cow.len() as u64,
                         FieldValue::OptStr(Some(cow)) => cow.len() as u64,
-                        FieldValue::OptStr(None) => 0,
+                        FieldValue::OptStr(None) => unreachable!("None filtered above"),
                         FieldValue::Number(n) => *n,
                     };
                     return eval_numeric(len, operator, compiled);

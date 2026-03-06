@@ -301,16 +301,25 @@ fn apply_one_transform<'a>(val: FieldValue<'a>, transform: &Transform) -> FieldV
         },
         Transform::UrlDecode => match val {
             FieldValue::Str(cow) => {
-                let decoded = percent_decode_str(&cow).decode_utf8_lossy().into_owned();
+                let decoded = decode_www_form_component(&cow);
                 FieldValue::Str(Cow::Owned(decoded))
             }
             FieldValue::OptStr(Some(cow)) => {
-                let decoded = percent_decode_str(&cow).decode_utf8_lossy().into_owned();
+                let decoded = decode_www_form_component(&cow);
                 FieldValue::OptStr(Some(Cow::Owned(decoded)))
             }
             other => other,
         },
     }
+}
+
+/// Decode a www-form-urlencoded component: replace '+' with space, then percent-decode.
+/// Matches Ruby's URI.decode_www_form_component behavior.
+fn decode_www_form_component(s: &str) -> String {
+    let plus_replaced = s.replace('+', " ");
+    percent_decode_str(&plus_replaced)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 impl<'a> FieldValue<'a> {

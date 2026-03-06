@@ -1,6 +1,5 @@
 # frozen_string_literal: true
 
-require "base64"
 require "ipaddr"
 require "json"
 require "openssl"
@@ -312,6 +311,14 @@ module Rack
           end
         end
 
+        # URL-safe Base64 decode without requiring the base64 gem
+        # (removed from Ruby 4.0 stdlib). Uses pack/unpack instead.
+        def urlsafe_decode64(str)
+          str = str.tr("-_", "+/")
+          str += "=" * ((4 - str.length % 4) % 4)
+          str.unpack1("m0")
+        end
+
         # JWT helpers — lazy decode with caching
 
         def jwt_token
@@ -335,9 +342,7 @@ module Rack
             return nil if parts.length != 3
 
             payload_b64 = parts[1]
-            # Add padding
-            payload_b64 += "=" * ((4 - payload_b64.length % 4) % 4)
-            payload_json = Base64.urlsafe_decode64(payload_b64)
+            payload_json = urlsafe_decode64(payload_b64)
             JSON.parse(payload_json)
           rescue StandardError => e
             warn "[Rack::Attack] JWT payload decode failed: #{e.message}"
@@ -356,8 +361,7 @@ module Rack
             return nil if parts.length != 3
 
             header_b64 = parts[0]
-            header_b64 += "=" * ((4 - header_b64.length % 4) % 4)
-            header_json = Base64.urlsafe_decode64(header_b64)
+            header_json = urlsafe_decode64(header_b64)
             JSON.parse(header_json)
           rescue StandardError => e
             warn "[Rack::Attack] JWT header decode failed: #{e.message}"
